@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import binascii
 from botocore.exceptions import *
 import boto3
 from boto3.dynamodb.types import Binary
@@ -56,10 +57,8 @@ class User(Object):
             }
         return schema
 
-    def get_new_session_token(self, timeout=60*60*24):
-        token = SessionToken(id=uuid.uuid1().hex)
-        token.user = self.email
-        token.expiry = expiry=int(time.time()) + timeout
+    def get_new_session_token(self, expiry_minutes=60*24):
+        token = SessionToken(user=self.email, expiry_minutes=expiry_minutes)
         token.create()
         return token
 
@@ -86,6 +85,19 @@ class User(Object):
 class SessionToken(Object):
 
     TABLE_NAME = 'toco_session_tokens'
+
+    def __init__(self, id=None, user=None, expiry_minutes=60*24):
+        if not id:
+            # Probably overkill
+            id = binascii.b2a_hex(hashlib.pbkdf2_hmac('sha256', uuid.uuid1().bytes, os.urandom(64), 50)).decode("utf-8")
+        super().__init__(id=id)
+        now = int(time.time())
+        if not self.__dict__.get('user'):
+            self.user = user
+        if not self.__dict__.get('created') and not self.__dict__.get('expiry'):
+            # Only add these if it isn't a new token.
+            self.created = now
+            self.expiry = now + 60 * expiry_minutes
 
     @staticmethod
     def validate(uuid):

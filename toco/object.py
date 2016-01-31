@@ -15,11 +15,10 @@ class Object:
         self.get_or_create_table()
 
         self.__dict__[VERSION_KEY] = 0
-        description = self._table.get_item(Key=kwargs)
+        description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
         if description.get('Item'):
             self.__dict__.update(description['Item'])
-        else:
-            self.__dict__.update(kwargs)
+        self.__dict__.update(kwargs)
 
     def add_attrs(self, *args, **kwargs):
         for arg in args:
@@ -50,6 +49,14 @@ class Object:
         ranges = [r['AttributeName'] for r in schema['KeySchema'] if r['KeyType']=='RANGE']
         range = ranges[0] if ranges else None
         return hash, range
+
+    def _extract_hash_and_range(self, dictionary):
+        hash, range = self._get_hash_and_range_keys()
+        keys = {}
+        for k in (hash, range):
+            if k and k in dictionary.keys():
+                keys[k] = dictionary[k]
+        return keys
 
     def save(self, force=False):
         old_version = self.__dict__.get(VERSION_KEY)
@@ -84,3 +91,8 @@ class Object:
         hash,range = self._get_hash_and_range_keys()
         CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
         self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
+
+    def reload(self):
+        description = self._table.get_item(Key=self._extract_hash_and_range(self.__dict__))
+        if description.get('Item'):
+            self.__dict__.update(description['Item'])
