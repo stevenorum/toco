@@ -32,6 +32,8 @@ CURRENT_PW_HASH = '01'
 
 class User(Object):
 
+    TABLE_NAME = 'toco_users'
+
     @staticmethod
     def load_with_auth(email, password):
         u = User(email=email)
@@ -43,7 +45,7 @@ class User(Object):
 
     def get_schema(self):
         schema = {
-            'TableName':'toco_users',
+            'TableName':User.TABLE_NAME,
             'KeySchema': [
                 {'AttributeName':'email', 'KeyType':'HASH'},
                 ],

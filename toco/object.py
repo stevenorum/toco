@@ -11,8 +11,14 @@ class Object:
     # Convention: all attributes that start with '_' will not be saved.  Attributes that end with '_toco_' are internal to the system and not for direct use by users.
 
     def __init__(self, **kwargs):
+        stage = None
+        try:
+            from django.conf import settings
+            stage = settings.TOCO_STAGE
+        except Exception as e:
+            pass
         self._client = boto3.client('dynamodb')
-        self.get_or_create_table()
+        self.get_or_create_table(stage)
 
         self.__dict__[VERSION_KEY] = 0
         description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
@@ -29,13 +35,16 @@ class Object:
                     self.__dict__.update(element)
         self.__dict__.update(kwds)
 
-    def get_or_create_table(self):
+    def get_or_create_table(self, stage=None):
         schema = self.get_schema()
+        TableName = schema.get('TableName')
+        if stage:
+            TableName = TableName + '_' + str(stage)
         try:
-            description = self._client.describe_table(TableName=schema.get('TableName'))
+            description = self._client.describe_table(TableName=TableName)
         except ClientError as e:
             self._client.create_table(**schema)
-        self._table = boto3.resource('dynamodb').Table(schema.get('TableName'))
+        self._table = boto3.resource('dynamodb').Table(TableName)
 
     def get_schema(self):
         raise NotImplementedError("Each subclass must implement this on their own.")
