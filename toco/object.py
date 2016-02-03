@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import *
 from boto3.dynamodb.conditions import Key, Attr
 import boto3
 import inspect
@@ -22,8 +22,10 @@ class Object:
 
         self.__dict__[VERSION_KEY] = 0
         description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
+        self.in_db = False
         if description.get('Item'):
             self.__dict__.update(description['Item'])
+            self.in_db = True
         self.__dict__.update(kwargs)
 
     def add_attrs(self, *args, **kwargs):
@@ -40,6 +42,7 @@ class Object:
         TableName = schema.get('TableName')
         if stage:
             TableName = TableName + '_' + str(stage)
+            schema['TableName'] = TableName
         try:
             description = self._client.describe_table(TableName=TableName)
         except ClientError as e:
@@ -73,6 +76,7 @@ class Object:
             CE = Attr(VERSION_KEY).eq(old_version)
         try:
             self.__dict__[VERSION_KEY] = old_version+1
+            self.in_db = True
             if force:
                 self._table.put_item(Item=self._get_dict())
             else:
@@ -89,6 +93,7 @@ class Object:
         if not force:
             CE = CE & Attr(VERSION_KEY).eq(old_version)
         try:
+            self.in_db = True
             self.__dict__[VERSION_KEY] = old_version+1
             self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
         except ClientError as e:
@@ -99,6 +104,7 @@ class Object:
     def create(self):
         hash,range = self._get_hash_and_range_keys()
         CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
+        self.in_db = True
         self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
 
     def reload(self):

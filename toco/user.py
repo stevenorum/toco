@@ -5,6 +5,7 @@ from botocore.exceptions import *
 import boto3
 from boto3.dynamodb.types import Binary
 from boto3.dynamodb.conditions import Key, Attr
+from datetime import datetime
 import hashlib
 import hmac
 import os
@@ -37,6 +38,8 @@ class User(Object):
     @staticmethod
     def load_with_auth(email, password):
         u = User(email=email)
+        if not u.in_db:
+            return None
         hash = HASHES[u.algo](password, u.salt)
         if hmac.compare_digest(hash, bytify_binary(u.hash)):
             return u
@@ -64,7 +67,7 @@ class User(Object):
         token.create()
         return token
 
-    def purge_tokens(self):
+    def purge_sessions(self):
         for token in self.active_session_tokens():
             token.expire()
 
@@ -87,6 +90,7 @@ class User(Object):
 class SessionToken(Object):
 
     TABLE_NAME = 'toco_session_tokens'
+    CKEY = 'TOCO_SESSION'
 
     def __init__(self, id=None, user=None, expiry_minutes=60*24):
         if not id:
@@ -101,13 +105,20 @@ class SessionToken(Object):
             self.created = now
             self.expiry = now + 60 * expiry_minutes
 
+    def expiry_datetime(self):
+        return datetime.fromtimestamp(self.expiry)
+
     @staticmethod
     def validate(uuid):
+        return SessionToken.get_user_and_session[0]
+
+    @staticmethod
+    def get_user_and_session(uuid):
         token = SessionToken(id=uuid)
+        user = None
         if getattr(token, 'user', None):
-            return User(email=token.user)
-        else:
-            return None
+            user= User(email=token.user)
+        return user, token
 
     def expire(self):
         self.expiry = int(time.time()-1)
