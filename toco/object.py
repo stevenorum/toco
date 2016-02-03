@@ -2,23 +2,27 @@
 
 from botocore.exceptions import *
 from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.types import TypeSerializer
 import boto3
 import inspect
+import logging
 
 VERSION_KEY = 'version_toco_'
 
+logger = logging.getLogger(__name__)
+
 class Object:
     # Convention: all attributes that start with '_' will not be saved.  Attributes that end with '_toco_' are internal to the system and not for direct use by users.
+    _STAGE = None
+    try:
+        from django.conf import settings
+        _STAGE = settings.TOCO_STAGE
+    except BaseException as e:
+        pass
 
     def __init__(self, **kwargs):
-        stage = None
-        try:
-            from django.conf import settings
-            stage = settings.TOCO_STAGE
-        except Exception as e:
-            pass
         self._client = boto3.client('dynamodb')
-        self.get_or_create_table(stage)
+        self.get_or_create_table()
 
         self.__dict__[VERSION_KEY] = 0
         description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
@@ -37,23 +41,40 @@ class Object:
                     self.__dict__.update(element)
         self.__dict__.update(kwds)
 
+    @classmethod
+    def TABLE_NAME(cls):
+        schema = cls.get_schema()
+        TableName = schema.get('TableName')
+        if cls._STAGE:
+            TableName = TableName + '_' + str(cls._STAGE)
+        return TableName
+
     def get_or_create_table(self, stage=None):
         schema = self.get_schema()
-        TableName = schema.get('TableName')
-        if stage:
-            TableName = TableName + '_' + str(stage)
-            schema['TableName'] = TableName
+        schema['TableName'] = self.TABLE_NAME()
         try:
-            description = self._client.describe_table(TableName=TableName)
+            description = self._client.describe_table(TableName=self.TABLE_NAME())
         except ClientError as e:
+            logging.exception()
             self._client.create_table(**schema)
-        self._table = boto3.resource('dynamodb').Table(TableName)
+        self._table = boto3.resource('dynamodb').Table(self.TABLE_NAME())
 
     def get_schema(self):
         raise NotImplementedError("Each subclass must implement this on their own.")
 
     def _get_dict(self):
-        return {a:getattr(self,a) for a in dir(self) if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_'}
+        ts = TypeSerializer()
+        d = {}
+        for a in dir(self):
+            try:
+                if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property)):
+                    ts.serialize(getattr(self,a)) # if DDB will choke on the data type, this will throw an error and prevent it from getting added to the dict
+                    d[a] = getattr(self,a)
+            except Exception as e:
+                logger.exception("Exception occured while parsing attr {} of object {}.  NOT STORING.".format(str(a), str(self)))
+        return d
+# one-line version that sadly doesn't work anymore due to a weird django attribute getting added to objects
+#         return {a:getattr(self,a) for a in dir(self) if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property))}
 
     def _get_hash_and_range_keys(self):
         schema = self.get_schema()
