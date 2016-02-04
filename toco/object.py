@@ -110,6 +110,13 @@ class Object:
         return FKEY_PREFIX+json.dumps(self.get_relation_map(), sort_keys=True, separators=(',', ':'))
 
     @classmethod
+    def get_required_attributes(cls):
+        '''
+        Returns all attributes that are required for an object to be saved but that aren't called out in the main schema as hash or range keys.
+        '''
+        return getattr(cls, 'REQUIRED_ATTRS', [])
+
+    @classmethod
     def TABLE_NAME(cls):
         '''
         Returns the name of table for the object by pulling it from cls.SCHEMA.  Includes stage and app name, if available from settings or environment variables.
@@ -131,7 +138,7 @@ class Object:
         try:
             description = self._client.describe_table(TableName=self.TABLE_NAME())
         except ClientError as e:
-            logging.exception()
+            logging.exception('')
             self._client.create_table(**schema)
         self._table = boto3.resource('dynamodb').Table(self.TABLE_NAME())
 
@@ -148,7 +155,8 @@ class Object:
         '''
         ts = TypeSerializer()
         d = {}
-        for a in dir(self):
+        for a in [k for k in dir(self) if k not in dir(type(self))]:
+            # limited to only instance attributes, not class attributes
             try:
                 if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property)):
                     if not isinstance(getattr(self,a), Object):
@@ -254,6 +262,10 @@ class Object:
         for key in [k for k in self._get_dict().keys() if isinstance(self._get_dict()[k], Object)]:
             fkey = self._get_dict()[key]._foreign_key
             dict_to_save[key] = fkey
+        required = self.get_required_attributes()
+        missing = [r for r in required if not r in dict_to_save or not dict_to_save[r]]
+        if missing:
+            raise RuntimeError('The following attributes are missing and must be added before saving: '+', '.join(missing))
         if CE:
             self._table.put_item(Item=dict_to_save, ConditionExpression=CE)
         else:

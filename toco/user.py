@@ -40,7 +40,7 @@ def hash_password_01(password, salt):
     '''
     hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytify_binary(salt)+get_hmac_key_01(), 1000000)
     return hash
-    
+
 HASHES = {'01':hash_password_01}
 
 CURRENT_PW_HASH = '01'
@@ -58,6 +58,22 @@ class User(Object):
         hash = HASHES[u.algo](password, u.salt)
         if hmac.compare_digest(hash, bytify_binary(u.hash)):
             return u
+        else:
+            return None
+
+    def password_is_correct(self, password):
+        hash = HASHES[self.algo](password, self.salt)
+        return hmac.compare_digest(hash, bytify_binary(self.hash))
+
+    @staticmethod
+    def load_from_password_reset_request(request):
+        '''
+        Verifies a password reset request and returns the appropriate user
+        '''
+        if isinstance(request, PasswordResetRequest):
+            return request.user
+        elif isinstance(request, str):
+            return PasswordResetRequest(id=request).user
         else:
             return None
 
@@ -87,6 +103,10 @@ class User(Object):
         for token in self.active_session_tokens():
             token.expire()
 
+    def purge_password_reset_requests(self):
+        for request in self.active_password_reset_requests():
+            request.expire()
+
     def set_password(self, password):
         self.salt = os.urandom(64)
         self.algo = CURRENT_PW_HASH
@@ -102,9 +122,20 @@ class User(Object):
             )
         return [SessionToken(id=i['id']) for i in response['Items']]
 
+    def active_password_reset_requests(self):
+        now = time.time()
+        table = boto3.resource('dynamodb').Table(PasswordResetRequest.TABLE_NAME())
+        response = table.query(
+            IndexName='user',
+            Select='ALL_ATTRIBUTES',
+            KeyConditionExpression=Key('user').eq(self._foreign_key) & Key('expiry').gt(int(now))
+            )
+        return [PasswordResetRequest(id=i['id']) for i in response['Items']]
+
 class SessionToken(Object):
 
     CKEY = 'TOCO_SESSION'
+    REQUIRED_ATTRS = ['id','expiry','user']
 
     def __init__(self, id=None, expiry_minutes=60*24, load_depth=1, **kwargs):
         self.auto_extend = False
@@ -197,12 +228,17 @@ class SessionToken(Object):
 
 class PasswordResetRequest(Object):
 
-    def __init__(self, id=None, user=None, expiry_minutes=60*24, **kwargs):
+    REQUIRED_ATTRS = ['id','expiry','user']
+
+    def __init__(self, id=None, email=None, expiry_minutes=60*24, **kwargs):
         if not id:
             id = binascii.b2a_hex(hashlib.pbkdf2_hmac('sha256', uuid.uuid1().bytes, os.urandom(64), 50)).decode("utf-8")
         super().__init__(id=id,**kwargs)
-        if user and not self.__dict__.get('user'):
-            self.user = user
+        if not email and not (hasattr(self, 'user') and not self.user):
+            # Might want to add an exception here, but either way, the website should display it as if it was a valid request.
+            return None
+        if email:
+            self.user = User(email=email)
         now = int(time.time())
         if not self.__dict__.get('created') and not self.__dict__.get('expiry'):
             # Only add these if it's a new request.
