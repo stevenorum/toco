@@ -111,7 +111,7 @@ class SessionToken(Object):
         self.extend_minute = 5
         if not id:
             id = binascii.b2a_hex(hashlib.pbkdf2_hmac('sha256', uuid.uuid1().bytes, os.urandom(64), 50)).decode("utf-8")
-        super().__init__(id=id, load_depth=1, **kwargs)
+        super().__init__(id=id, load_depth=load_depth, **kwargs)
         now = int(time.time())
         if not self.__dict__.get('created') and not self.__dict__.get('expiry'):
             # Only add these if it's a new token.
