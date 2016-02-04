@@ -10,3 +10,16 @@ u = User.load_with_auth(email, password)
         
 u.purge_sessions()
 token = u.get_new_session_token()
+print(token)
+print(token.user)
+# print(dir(token))
+print(token.user_rel_toco_)
+token.test_attr = {'foo':'bar'}
+token.save()
+print(token.id)
+del token.__dict__['user']
+token.add_relations()
+print(token)
+print(token.user)
+# print(dir(token))
+print(token.user_rel_toco_)

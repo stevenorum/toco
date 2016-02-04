@@ -11,6 +11,7 @@ class AuthMW(object):
 
     def process_request(self, request):
         request.user, request.session = SessionToken.get_user_and_session(uuid=request.COOKIES.get(SessionToken.CKEY))
+        request.session.keepalive_if_requested()
  
     def process_response(self, request, response):
         if request.COOKIES.get(SessionToken.CKEY) and not request.user:
