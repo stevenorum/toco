@@ -11,7 +11,7 @@ import hmac
 import logging
 import os
 import time
-from toco.object import Object
+from toco.object import Object, RELATION_SUFFIX
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class User(Object):
         response = table.query(
             IndexName='user',
             Select='ALL_ATTRIBUTES',
-            KeyConditionExpression=Key('user').eq(self.email) & Key('expiry').gt(int(now))
+            KeyConditionExpression=Key('user').eq(self._foreign_key) & Key('expiry').gt(int(now))
             )
         return [SessionToken(id=i['id']) for i in response['Items']]
 
@@ -106,24 +106,37 @@ class SessionToken(Object):
 
     CKEY = 'TOCO_SESSION'
 
-    def __init__(self, id=None, user=None, expiry_minutes=60*24, auto_extend=False, extend_minutes=5, **kwargs):
+    def __init__(self, id=None, expiry_minutes=60*24, recurse=1, **kwargs):
+        self.auto_extend = False
+        self.extend_minute = 5
         if not id:
-            # Probably overkill
             id = binascii.b2a_hex(hashlib.pbkdf2_hmac('sha256', uuid.uuid1().bytes, os.urandom(64), 50)).decode("utf-8")
-        super().__init__(id=id,**kwargs)
-        if user and not self.__dict__.get('user'):
-            self.relate(user=user)
+#         print("Provided user: "+str(user))
+#         if user:
+#             kwargs['user']=user
+        super().__init__(id=id, recurse=recurse, **kwargs)
+#         print("After interior constructor. User: "+str(self.user))
+#         self.user = None
+#         if user and not self.__dict__.get('user'):
+#         print("Before relate call. Provided user: "+str(self.user))
+#         params={'user':user}
+#         print("Calling relate with the following params:")
+#         print(str(params))
+# #         self.relate(user=user)
+#         self.relate(**params)
+#         print("After relate call. User: "+str(self.user))
         now = int(time.time())
         if not self.__dict__.get('created') and not self.__dict__.get('expiry'):
             # Only add these if it's a new token.
             self.created = now
             self.expiry = now + 60 * expiry_minutes
+#         print("End of session token constructor. User: "+str(self.user))
 
     def keepalive_if_requested(self):
         """
         If auto-extension was requested when the session was created, this makes sure that the expiration time of the token is at least extend_minutes (constructor parameter, default is 5) minutes in the future.  This is called every time the middleware loads the session.
         """
-        if auto_extend:
+        if self.auto_extend:
             self.expiry = max(self.expiry, int(time.time()) + 60 * extend_minutes)
             self.save()
 

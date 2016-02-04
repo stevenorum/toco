@@ -29,8 +29,15 @@ def get_class(clazzname):
     return mod
 
 def load_object(key, clazzname, recurse=0):
-    clazz = get_class(clazzname)
-    return clazz(recurse=0, **key)
+    return get_class(clazzname)(recurse=0, **key)
+
+def load_object_from_relation(relation, recurse=0):
+    return load_object(key=relation['key'], clazzname=relation['class'], recurse=recurse)
+
+def fkey_from_relation(relation):
+    keys = ["{}:{}".format(key, relation['key'][key]) for key in relation['key']]
+    keys += ['_class:'+str(relation['class'])]
+    return '/toco/'.join(sorted(keys)) # wierd combiner, I realize, but it'll help avoid collisions with user keys
 
 class Object:
     '''
@@ -70,11 +77,16 @@ class Object:
             self.in_db = True
         self.__dict__.update(kwargs)
         if recurse > 0:
+#             print("Recurse={}, recursing...".format(str(recurse)))
             self.add_relations(recurse=recurse-1)
 
     @property
     def clazz(self):
         return self.__module__ + "." + self.__class__.__name__
+
+    @property
+    def _foreign_key(self):
+        return fkey_from_relation({'class':self.clazz,'key':self._extract_hash_and_range()})
 
     def load_relations(self, recurse=0):
         '''
@@ -83,16 +95,16 @@ class Object:
         keys = self.__dict__.keys()
         relation_keys = [key for key in self.__dict__.keys() if key.endswith(RELATION_SUFFIX)]
         for key in relation_keys:
+#             print("Relation key: "+key)
             relation = getattr(self, key)
+#             print(relation)
             obj_name = key[:-len(RELATION_SUFFIX)]
-            if hasattr(self, obj_name):
-                if isinstance(getattr(self, obj_name, None), Object):
-                    pass
-                else:
-                    # Hilariously bad message.  Fix ASAP.
-                    raise RuntimeError('Object has relation, but corresponding attribute is not an object.')
+            if hasattr(self, obj_name) and isinstance(getattr(self, obj_name, 3), Object):
+#                 print("Already has a value for this relation: " + str(getattr(self, obj_name, None)))
+                pass
             else:
-                setattr(self, obj_name, load_object(key=relation['key'], clazzname=relation['class'], recurse=recurse))
+                setattr(self, obj_name, load_object_from_relation(relation=relation, recurse=recurse))
+#             print("Attr set: "+str(getattr(self, obj_name)))
 
     def add_relations(self, recurse=0):
         '''
@@ -102,25 +114,30 @@ class Object:
         This should be called after loading an object.
         However, this SHOULD NOT currently be added to a constructor.  If a bidirectional relationship exists, that could cause an infinite loop.
         '''
-        self.relate(**(self._get_dict()))
+        self.relate(only_objects=True, **(self.__dict__))
         self.load_relations(recurse=recurse)
 
-    def relate(self, **kwargs):
+    def relate(self, only_objects=True, **kwargs):
         '''
         Lets you set multiple attributes at once.  If any of them are Object subclasses, automatically parses out their hash and range keys.
         STILL A WORK IN PROGRESS
         '''
-        to_add = copy.copy(kwargs)
+        print("Params to relate:")
+        print(str(kwargs))
+#         to_add = copy.copy(kwargs)
+        to_add = {}
         for key in kwargs:
+#             print("Dict key: "+key)
             obj = kwargs[key]
+#             print(obj)
             if isinstance(obj, Object):
+#                 print("Is an object!")
                 relation = {'key':obj._extract_hash_and_range(), 'class':obj.clazz}
+                to_add[str(key)] = obj
                 to_add[str(key) + RELATION_SUFFIX] = relation
+        print("Relate is about to update with the following dict:")
+        print(str(to_add))
         self.__dict__.update(to_add)
-
-    @property
-    def _keystring(self):
-        return json.dumps(self._extract_hash_and_range())
 
     @classmethod
     def TABLE_NAME(cls):
@@ -219,9 +236,11 @@ class Object:
             self.add_relations()
             self.in_db = True
             if force:
-                self._table.put_item(Item=self._get_dict())
+                self._store()
+#                 self._table.put_item(Item=self._get_dict())
             else:
-                self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
+                self._store(CE)
+#                 self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
         except ClientError as e:
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
@@ -243,7 +262,8 @@ class Object:
             self.add_relations()
             self.in_db = True
             self.__dict__[VERSION_KEY] = old_version+1
-            self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
+            self._store(CE)
+#             self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
         except ClientError as e:
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
@@ -257,7 +277,20 @@ class Object:
         CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
         self.add_relations()
         self.in_db = True
-        self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
+        self._store(CE)
+#         self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
+
+    def _store(self, CE=None):
+        print("About to store object "+str(self))
+        print("Full contents: {}".format(self.__dict__))
+        dict_to_save = self._get_dict()
+        for relation in [k for k in self._get_dict().keys() if k.endswith(RELATION_SUFFIX)]:
+            dict_to_save[relation[:-1*len(RELATION_SUFFIX)]] = fkey_from_relation(self._get_dict()[relation])
+        print("Contents to store: {}".format(dict_to_save))
+        if CE:
+            self._table.put_item(Item=dict_to_save, ConditionExpression=CE)
+        else:
+            self._table.put_item(Item=dict_to_save)
 
     def reload(self):
         '''
