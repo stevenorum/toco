@@ -13,6 +13,7 @@ import os
 VERSION_KEY = 'version_toco_'
 
 RELATION_SUFFIX = '_rel_toco_'
+FKEY_PREFIX = 'toco_fkey='
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,25 @@ def get_class(clazzname):
 def load_object(key, clazzname, recurse=0):
     return get_class(clazzname)(recurse=0, **key)
 
-def load_object_from_relation(relation, recurse=0):
-    return load_object(key=relation['key'], clazzname=relation['class'], recurse=recurse)
+def is_foreign_key(fkey):
+    if not isinstance(fkey, str) or not fkey.startswith(FKEY_PREFIX):
+        return False
+    try:
+        obj = json.loads(fkey[len(FKEY_PREFIX):])
+        obj['class']
+        obj['key']
+        return True
+    except:
+        # If the above throws an exception, we know it isn't a valid foreign key
+        # We might want to raise an exception instead if it has the fkey prefix but isn't valid,
+        # but I'll add that later if it looks useful.
+        return False
 
-def fkey_from_relation(relation):
-    keys = ["{}:{}".format(key, relation['key'][key]) for key in relation['key']]
-    keys += ['_class:'+str(relation['class'])]
-    return '/toco/'.join(sorted(keys)) # wierd combiner, I realize, but it'll help avoid collisions with user keys
+def load_from_fkey(fkey):
+    if not is_foreign_key(fkey):
+        return None
+    obj = json.loads(fkey[len(FKEY_PREFIX):])
+    return load_object(key=obj['key'], clazzname=obj['class'])
 
 class Object:
     '''
@@ -59,7 +72,7 @@ class Object:
     except BaseException as e:
         pass
 
-    def __init__(self, recurse=0, **kwargs):
+    def __init__(self, load_depth=1, **kwargs):
         '''
 
         '''
@@ -71,73 +84,30 @@ class Object:
         self.in_db = False
         if description.get('Item'):
             self.__dict__.update(description['Item'])
-            for k in [key for key in description['Item'].keys() if key.endswith(RELATION_SUFFIX)]:
-#                 self.__dict__[k] = json.loads(description['Item'][k])
-                self.__dict__[k] = description['Item'][k]
             self.in_db = True
         self.__dict__.update(kwargs)
-        if recurse > 0:
-#             print("Recurse={}, recursing...".format(str(recurse)))
-            self.add_relations(recurse=recurse-1)
+        self.unroll_foreign_keys(load_depth=load_depth)
+
+    def unroll_foreign_keys(self, load_depth=1):
+        if load_depth > 0:
+            fkeys = [key for key in self.__dict__.keys() if is_foreign_key(getattr(self, key))]
+            for key in fkeys:
+                fkey = getattr(self, key)
+                # load the object and also recurse
+                setattr(self, key, load_from_fkey(fkey).unroll_foreign_keys(load_depth=load_depth-1))
+        # return self so that it can be chained constructor->unroll within a setter
+        return self
 
     @property
     def clazz(self):
         return self.__module__ + "." + self.__class__.__name__
 
+    def get_relation_map(self):
+        return {'class':self.clazz,'key':self._extract_hash_and_range()}
+
     @property
     def _foreign_key(self):
-        return fkey_from_relation({'class':self.clazz,'key':self._extract_hash_and_range()})
-
-    def load_relations(self, recurse=0):
-        '''
-        Searches the object's attributes for relation info and when found, loads the related objects.
-        '''
-        keys = self.__dict__.keys()
-        relation_keys = [key for key in self.__dict__.keys() if key.endswith(RELATION_SUFFIX)]
-        for key in relation_keys:
-#             print("Relation key: "+key)
-            relation = getattr(self, key)
-#             print(relation)
-            obj_name = key[:-len(RELATION_SUFFIX)]
-            if hasattr(self, obj_name) and isinstance(getattr(self, obj_name, 3), Object):
-#                 print("Already has a value for this relation: " + str(getattr(self, obj_name, None)))
-                pass
-            else:
-                setattr(self, obj_name, load_object_from_relation(relation=relation, recurse=recurse))
-#             print("Attr set: "+str(getattr(self, obj_name)))
-
-    def add_relations(self, recurse=0):
-        '''
-        Adds the detailed relation entry for each Object that's an attribute of this Object.
-
-        This should be called before every save and after every load.  (The code currently already does this.)
-        This should be called after loading an object.
-        However, this SHOULD NOT currently be added to a constructor.  If a bidirectional relationship exists, that could cause an infinite loop.
-        '''
-        self.relate(only_objects=True, **(self.__dict__))
-        self.load_relations(recurse=recurse)
-
-    def relate(self, only_objects=True, **kwargs):
-        '''
-        Lets you set multiple attributes at once.  If any of them are Object subclasses, automatically parses out their hash and range keys.
-        STILL A WORK IN PROGRESS
-        '''
-        print("Params to relate:")
-        print(str(kwargs))
-#         to_add = copy.copy(kwargs)
-        to_add = {}
-        for key in kwargs:
-#             print("Dict key: "+key)
-            obj = kwargs[key]
-#             print(obj)
-            if isinstance(obj, Object):
-#                 print("Is an object!")
-                relation = {'key':obj._extract_hash_and_range(), 'class':obj.clazz}
-                to_add[str(key)] = obj
-                to_add[str(key) + RELATION_SUFFIX] = relation
-        print("Relate is about to update with the following dict:")
-        print(str(to_add))
-        self.__dict__.update(to_add)
+        return FKEY_PREFIX+json.dumps(self.get_relation_map(), sort_keys=True, separators=(',', ':'))
 
     @classmethod
     def TABLE_NAME(cls):
@@ -181,7 +151,10 @@ class Object:
         for a in dir(self):
             try:
                 if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property)):
-                    ts.serialize(getattr(self,a)) # if DDB will choke on the data type, this will throw an error and prevent it from getting added to the dict
+                    if not isinstance(getattr(self,a), Object):
+                        # if DDB will choke on the data type, this will throw an error and prevent it from getting added to the dict
+                        # however, we convert Objects to foreign-key references before saving, so don't do this if it's one of ours.
+                        ts.serialize(getattr(self,a))
                     d[a] = getattr(self,a)
             except Exception as e:
                 pass
@@ -189,6 +162,8 @@ class Object:
         return d
 # one-line version that sadly doesn't work anymore due to a weird django attribute getting added to objects
 #         return {a:getattr(self,a) for a in dir(self) if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property))}
+
+
 
     @property
     def _hash(self):
@@ -233,14 +208,11 @@ class Object:
             CE = Attr(VERSION_KEY).eq(old_version)
         try:
             self.__dict__[VERSION_KEY] = old_version+1
-            self.add_relations()
             self.in_db = True
             if force:
                 self._store()
-#                 self._table.put_item(Item=self._get_dict())
             else:
                 self._store(CE)
-#                 self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
         except ClientError as e:
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
@@ -259,11 +231,9 @@ class Object:
         if not force:
             CE = CE & Attr(VERSION_KEY).eq(old_version)
         try:
-            self.add_relations()
             self.in_db = True
             self.__dict__[VERSION_KEY] = old_version+1
             self._store(CE)
-#             self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
         except ClientError as e:
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
@@ -275,18 +245,15 @@ class Object:
         '''
         hash,range = self._get_hash_and_range_keys()
         CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
-        self.add_relations()
         self.in_db = True
         self._store(CE)
-#         self._table.put_item(Item=self._get_dict(), ConditionExpression=CE)
 
     def _store(self, CE=None):
-        print("About to store object "+str(self))
-        print("Full contents: {}".format(self.__dict__))
-        dict_to_save = self._get_dict()
-        for relation in [k for k in self._get_dict().keys() if k.endswith(RELATION_SUFFIX)]:
-            dict_to_save[relation[:-1*len(RELATION_SUFFIX)]] = fkey_from_relation(self._get_dict()[relation])
-        print("Contents to store: {}".format(dict_to_save))
+        # Broken out separately so that we can easily manipulate the blob being saved.
+        dict_to_save = copy.copy(self._get_dict())
+        for key in [k for k in self._get_dict().keys() if isinstance(self._get_dict()[k], Object)]:
+            fkey = self._get_dict()[key]._foreign_key
+            dict_to_save[key] = fkey
         if CE:
             self._table.put_item(Item=dict_to_save, ConditionExpression=CE)
         else:
@@ -299,4 +266,4 @@ class Object:
         description = self._table.get_item(Key=self._extract_hash_and_range(self.__dict__))
         if description.get('Item'):
             self.__dict__.update(description['Item'])
-            self.add_relations()
+            self.unroll_foreign_keys(load_depth=1)

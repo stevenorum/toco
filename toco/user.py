@@ -106,31 +106,17 @@ class SessionToken(Object):
 
     CKEY = 'TOCO_SESSION'
 
-    def __init__(self, id=None, expiry_minutes=60*24, recurse=1, **kwargs):
+    def __init__(self, id=None, expiry_minutes=60*24, load_depth=1, **kwargs):
         self.auto_extend = False
         self.extend_minute = 5
         if not id:
             id = binascii.b2a_hex(hashlib.pbkdf2_hmac('sha256', uuid.uuid1().bytes, os.urandom(64), 50)).decode("utf-8")
-#         print("Provided user: "+str(user))
-#         if user:
-#             kwargs['user']=user
-        super().__init__(id=id, recurse=recurse, **kwargs)
-#         print("After interior constructor. User: "+str(self.user))
-#         self.user = None
-#         if user and not self.__dict__.get('user'):
-#         print("Before relate call. Provided user: "+str(self.user))
-#         params={'user':user}
-#         print("Calling relate with the following params:")
-#         print(str(params))
-# #         self.relate(user=user)
-#         self.relate(**params)
-#         print("After relate call. User: "+str(self.user))
+        super().__init__(id=id, load_depth=1, **kwargs)
         now = int(time.time())
         if not self.__dict__.get('created') and not self.__dict__.get('expiry'):
             # Only add these if it's a new token.
             self.created = now
             self.expiry = now + 60 * expiry_minutes
-#         print("End of session token constructor. User: "+str(self.user))
 
     def keepalive_if_requested(self):
         """
@@ -159,14 +145,10 @@ class SessionToken(Object):
     @staticmethod
     def get_user_and_session(uuid):
         token = SessionToken(id=uuid)
-        token.add_relations()
         if token.expiry < time.time():
             return None, None
         else:
-            user = None
-            if getattr(token, 'user', None):
-                user = User(email=token.user)
-            return user, token
+            return token.user, token
 
     def expire(self):
         self.expiry = int(time.time()-1)

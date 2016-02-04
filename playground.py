@@ -13,13 +13,18 @@ token = u.get_new_session_token()
 print(token)
 print(token.user)
 # print(dir(token))
-print(token.user_rel_toco_)
+# print(token.user_rel_toco_)
 token.test_attr = {'foo':'bar'}
 token.save()
 print(token.id)
-del token.__dict__['user']
-token.add_relations()
+# del token.__dict__['user']
+# print(dir(token))
+token.reload()
+# token.add_relations()
 print(token)
 print(token.user)
+token.unroll_foreign_keys()
+print(token.user)
+
 # print(dir(token))
-print(token.user_rel_toco_)
+# print(token.user_rel_toco_)
