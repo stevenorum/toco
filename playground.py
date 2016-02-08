@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # import inspect
-from toco.user import User, SessionToken, PasswordResetRequest
+from toco.django.user import User, SessionToken, PasswordResetRequest
 
 email='test@mail.com'
 password='guest'
