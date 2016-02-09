@@ -1,0 +1,7 @@
+#!/bin/bash
+
+CUR=`pwd`
+sphinx-apidoc -o docs/source/ toco/
+cd docs
+make html
+cd $CUR

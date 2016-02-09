@@ -30,6 +30,16 @@ def get_class(clazzname):
     return mod
 
 def load_object(key, clazzname, recurse=0):
+    '''
+    .. function:: load_object(key, clazzname[, recurse=0])
+    
+    Load the object with the given key and the given class.
+    
+    :param key: dict containing the keys
+    :param clazzname: name of the class of the object
+    :param recurse: how deeply to load objects.  0 (default) just loads the given object.  1 loads any toco objects it has as attributes, 2 loads theirs, etc.
+    :rtype: Object
+    '''
     return get_class(clazzname)(recurse=0, **key)
 
 def is_foreign_key(fkey):
