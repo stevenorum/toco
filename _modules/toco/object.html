@@ -1,0 +1,377 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    
+    <title>toco.object &mdash; toco 0.1 documentation</title>
+    
+    <link rel="stylesheet" href="../../_static/alabaster.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    '../../',
+        VERSION:     '0.1',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true
+      };
+    </script>
+    <script type="text/javascript" src="../../_static/jquery.js"></script>
+    <script type="text/javascript" src="../../_static/underscore.js"></script>
+    <script type="text/javascript" src="../../_static/doctools.js"></script>
+    <link rel="top" title="toco 0.1 documentation" href="../../index.html" />
+    <link rel="up" title="Module code" href="../index.html" />
+   
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body role="document">  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <h1>Source code for toco.object</h1><div class="highlight"><pre>
+<span class="ch">#!/usr/bin/env python3</span>
+
+<span class="kn">from</span> <span class="nn">botocore.exceptions</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">boto3.dynamodb.conditions</span> <span class="kn">import</span> <span class="n">Key</span><span class="p">,</span> <span class="n">Attr</span>
+<span class="kn">from</span> <span class="nn">boto3.dynamodb.types</span> <span class="kn">import</span> <span class="n">TypeSerializer</span>
+<span class="kn">import</span> <span class="nn">boto3</span>
+<span class="kn">import</span> <span class="nn">copy</span>
+<span class="kn">import</span> <span class="nn">inspect</span>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">logging</span>
+<span class="kn">import</span> <span class="nn">os</span>
+
+<span class="n">VERSION_KEY</span> <span class="o">=</span> <span class="s1">&#39;version_toco_&#39;</span>
+
+<span class="n">RELATION_SUFFIX</span> <span class="o">=</span> <span class="s1">&#39;_rel_toco_&#39;</span>
+<span class="n">FKEY_PREFIX</span> <span class="o">=</span> <span class="s1">&#39;toco_fkey=&#39;</span>
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<div class="viewcode-block" id="get_class"><a class="viewcode-back" href="../../toco.html#toco.object.get_class">[docs]</a><span class="k">def</span> <span class="nf">get_class</span><span class="p">(</span><span class="n">clazzname</span><span class="p">):</span>
+    <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">    Dynamically retrieve a class.</span>
+
+<span class="sd">    From http://stackoverflow.com/questions/547829/how-to-dynamically-load-a-python-class</span>
+<span class="sd">    &#39;&#39;&#39;</span>
+    <span class="n">components</span> <span class="o">=</span> <span class="n">clazzname</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">&#39;.&#39;</span><span class="p">)</span>
+    <span class="n">mod</span> <span class="o">=</span> <span class="nb">__import__</span><span class="p">(</span><span class="n">components</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="k">for</span> <span class="n">comp</span> <span class="ow">in</span> <span class="n">components</span><span class="p">[</span><span class="mi">1</span><span class="p">:]:</span>
+        <span class="n">mod</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">mod</span><span class="p">,</span> <span class="n">comp</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">mod</span></div>
+
+<div class="viewcode-block" id="load_object"><a class="viewcode-back" href="../../toco.html#toco.object.load_object">[docs]</a><span class="k">def</span> <span class="nf">load_object</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">clazzname</span><span class="p">,</span> <span class="n">recurse</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">    .. function:: load_object(key, clazzname[, recurse=0])</span>
+<span class="sd">    </span>
+<span class="sd">    Load the object with the given key and the given class.</span>
+<span class="sd">    </span>
+<span class="sd">    :param key: dict containing the keys</span>
+<span class="sd">    :param clazzname: name of the class of the object</span>
+<span class="sd">    :param recurse: how deeply to load objects.  0 (default) just loads the given object.  1 loads any toco objects it has as attributes, 2 loads theirs, etc.</span>
+<span class="sd">    :rtype: Object</span>
+<span class="sd">    &#39;&#39;&#39;</span>
+    <span class="k">return</span> <span class="n">get_class</span><span class="p">(</span><span class="n">clazzname</span><span class="p">)(</span><span class="n">recurse</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="o">**</span><span class="n">key</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="is_foreign_key"><a class="viewcode-back" href="../../toco.html#toco.object.is_foreign_key">[docs]</a><span class="k">def</span> <span class="nf">is_foreign_key</span><span class="p">(</span><span class="n">fkey</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">fkey</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">fkey</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">FKEY_PREFIX</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">False</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">obj</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">fkey</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">FKEY_PREFIX</span><span class="p">):])</span>
+        <span class="n">obj</span><span class="p">[</span><span class="s1">&#39;class&#39;</span><span class="p">]</span>
+        <span class="n">obj</span><span class="p">[</span><span class="s1">&#39;key&#39;</span><span class="p">]</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">except</span><span class="p">:</span>
+        <span class="c1"># If the above throws an exception, we know it isn&#39;t a valid foreign key</span>
+        <span class="c1"># We might want to raise an exception instead if it has the fkey prefix but isn&#39;t valid,</span>
+        <span class="c1"># but I&#39;ll add that later if it looks useful.</span>
+        <span class="k">return</span> <span class="bp">False</span></div>
+
+<div class="viewcode-block" id="load_from_fkey"><a class="viewcode-back" href="../../toco.html#toco.object.load_from_fkey">[docs]</a><span class="k">def</span> <span class="nf">load_from_fkey</span><span class="p">(</span><span class="n">fkey</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">is_foreign_key</span><span class="p">(</span><span class="n">fkey</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">None</span>
+    <span class="n">obj</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">fkey</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">FKEY_PREFIX</span><span class="p">):])</span>
+    <span class="k">return</span> <span class="n">load_object</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="n">obj</span><span class="p">[</span><span class="s1">&#39;key&#39;</span><span class="p">],</span> <span class="n">clazzname</span><span class="o">=</span><span class="n">obj</span><span class="p">[</span><span class="s1">&#39;class&#39;</span><span class="p">])</span></div>
+
+<div class="viewcode-block" id="Object"><a class="viewcode-back" href="../../toco.html#toco.object.Object">[docs]</a><span class="k">class</span> <span class="nc">Object</span><span class="p">:</span>
+    <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">    Base class for all DynamoDB-storable toco objects.  Cannot itself be instantiated.</span>
+
+<span class="sd">    The only thing that a subclass is required to implement is the classmethod SCHEMA, and it must return a dict that can be passed to client.create_table(**schema) and succeed.</span>
+<span class="sd">    &#39;&#39;&#39;</span>
+    <span class="c1"># Convention: all attributes that start with &#39;_&#39; will not be saved.  Attributes that end with &#39;_toco_&#39; are internal to the system and not for direct use by users.</span>
+    <span class="n">_STAGE</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;TOCO_STAGE&#39;</span><span class="p">)</span>
+    <span class="n">_APP</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;TOCO_APP&#39;</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="kn">from</span> <span class="nn">django.conf</span> <span class="kn">import</span> <span class="n">settings</span>
+        <span class="n">_STAGE</span> <span class="o">=</span> <span class="n">settings</span><span class="o">.</span><span class="n">TOCO_STAGE</span>
+    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">pass</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="kn">from</span> <span class="nn">django.conf</span> <span class="kn">import</span> <span class="n">settings</span>
+        <span class="n">_APP</span> <span class="o">=</span> <span class="n">settings</span><span class="o">.</span><span class="n">TOCO_APP</span>
+    <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">load_depth</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_client</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">client</span><span class="p">(</span><span class="s1">&#39;dynamodb&#39;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_get_or_create_table</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">[</span><span class="n">VERSION_KEY</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">description</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_extract_hash_and_range</span><span class="p">(</span><span class="n">kwargs</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">in_db</span> <span class="o">=</span> <span class="bp">False</span>
+        <span class="k">if</span> <span class="n">description</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;Item&#39;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">description</span><span class="p">[</span><span class="s1">&#39;Item&#39;</span><span class="p">])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">in_db</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">unroll_foreign_keys</span><span class="p">(</span><span class="n">load_depth</span><span class="o">=</span><span class="n">load_depth</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Object.unroll_foreign_keys"><a class="viewcode-back" href="../../toco.html#toco.object.Object.unroll_foreign_keys">[docs]</a>    <span class="k">def</span> <span class="nf">unroll_foreign_keys</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">load_depth</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">load_depth</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">fkeys</span> <span class="o">=</span> <span class="p">[</span><span class="n">key</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span> <span class="k">if</span> <span class="n">is_foreign_key</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">))]</span>
+            <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">fkeys</span><span class="p">:</span>
+                <span class="n">fkey</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+                <span class="c1"># load the object and also recurse</span>
+                <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">load_from_fkey</span><span class="p">(</span><span class="n">fkey</span><span class="p">)</span><span class="o">.</span><span class="n">unroll_foreign_keys</span><span class="p">(</span><span class="n">load_depth</span><span class="o">=</span><span class="n">load_depth</span><span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+        <span class="c1"># return self so that it can be chained constructor-&gt;unroll within a setter</span>
+        <span class="k">return</span> <span class="bp">self</span></div>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">clazz</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">__module__</span> <span class="o">+</span> <span class="s2">&quot;.&quot;</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">__class__</span><span class="o">.</span><span class="n">__name__</span>
+
+<div class="viewcode-block" id="Object.get_relation_map"><a class="viewcode-back" href="../../toco.html#toco.object.Object.get_relation_map">[docs]</a>    <span class="k">def</span> <span class="nf">get_relation_map</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;class&#39;</span><span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">clazz</span><span class="p">,</span><span class="s1">&#39;key&#39;</span><span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">_extract_hash_and_range</span><span class="p">()}</span></div>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">_foreign_key</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">FKEY_PREFIX</span><span class="o">+</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">get_relation_map</span><span class="p">(),</span> <span class="n">sort_keys</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">separators</span><span class="o">=</span><span class="p">(</span><span class="s1">&#39;,&#39;</span><span class="p">,</span> <span class="s1">&#39;:&#39;</span><span class="p">))</span>
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="Object.get_required_attributes"><a class="viewcode-back" href="../../toco.html#toco.object.Object.get_required_attributes">[docs]</a>    <span class="k">def</span> <span class="nf">get_required_attributes</span><span class="p">(</span><span class="n">cls</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Returns all attributes that are required for an object to be saved but that aren&#39;t called out in the main schema as hash or range keys.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="s1">&#39;REQUIRED_ATTRS&#39;</span><span class="p">,</span> <span class="p">[])</span></div>
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="Object.TABLE_NAME"><a class="viewcode-back" href="../../toco.html#toco.object.Object.TABLE_NAME">[docs]</a>    <span class="k">def</span> <span class="nf">TABLE_NAME</span><span class="p">(</span><span class="n">cls</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Returns the name of table for the object by pulling it from cls.SCHEMA.  Includes stage and app name, if available from settings or environment variables.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">schema</span> <span class="o">=</span> <span class="n">cls</span><span class="o">.</span><span class="n">SCHEMA</span><span class="p">()</span>
+        <span class="n">TableName</span> <span class="o">=</span> <span class="n">schema</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;TableName&#39;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">cls</span><span class="o">.</span><span class="n">_APP</span><span class="p">:</span>
+            <span class="n">TableName</span> <span class="o">=</span> <span class="n">TableName</span> <span class="o">+</span> <span class="s1">&#39;_&#39;</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">cls</span><span class="o">.</span><span class="n">_APP</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">cls</span><span class="o">.</span><span class="n">_STAGE</span><span class="p">:</span>
+            <span class="n">TableName</span> <span class="o">=</span> <span class="n">TableName</span> <span class="o">+</span> <span class="s1">&#39;_&#39;</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">cls</span><span class="o">.</span><span class="n">_STAGE</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">TableName</span></div>
+
+    <span class="k">def</span> <span class="nf">_get_or_create_table</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stage</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Create the table needed to store the objects, if it doesn&#39;t yet exist.  Either way, return the table.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">schema</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">SCHEMA</span><span class="p">()</span>
+        <span class="n">schema</span><span class="p">[</span><span class="s1">&#39;TableName&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">TABLE_NAME</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">description</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_client</span><span class="o">.</span><span class="n">describe_table</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">TABLE_NAME</span><span class="p">())</span>
+        <span class="k">except</span> <span class="n">ClientError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">logging</span><span class="o">.</span><span class="n">exception</span><span class="p">(</span><span class="s1">&#39;&#39;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_client</span><span class="o">.</span><span class="n">create_table</span><span class="p">(</span><span class="o">**</span><span class="n">schema</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_table</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="s1">&#39;dynamodb&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">TABLE_NAME</span><span class="p">())</span>
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="Object.SCHEMA"><a class="viewcode-back" href="../../toco.html#toco.object.Object.SCHEMA">[docs]</a>    <span class="k">def</span> <span class="nf">SCHEMA</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Returns the full table schema needed to create it in DynamoDB, as a dict.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span><span class="s2">&quot;Each subclass must implement this on their own.&quot;</span><span class="p">)</span></div>
+
+    <span class="k">def</span> <span class="nf">_get_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Parses self.__dict__ and returns only those objects that should be stored in the database.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">ts</span> <span class="o">=</span> <span class="n">TypeSerializer</span><span class="p">()</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">a</span> <span class="ow">in</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">dir</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="k">if</span> <span class="n">k</span> <span class="ow">not</span> <span class="ow">in</span> <span class="nb">dir</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">))]:</span>
+            <span class="c1"># limited to only instance attributes, not class attributes</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">inspect</span><span class="o">.</span><span class="n">ismethod</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">a</span><span class="p">))</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">inspect</span><span class="o">.</span><span class="n">isfunction</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">a</span><span class="p">))</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">a</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="s1">&#39;_&#39;</span> <span class="ow">and</span> <span class="ow">not</span> <span class="p">(</span><span class="nb">hasattr</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">),</span><span class="n">a</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">),</span><span class="n">a</span><span class="p">),</span> <span class="nb">property</span><span class="p">)):</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">a</span><span class="p">),</span> <span class="n">Object</span><span class="p">):</span>
+                        <span class="c1"># if DDB will choke on the data type, this will throw an error and prevent it from getting added to the dict</span>
+                        <span class="c1"># however, we convert Objects to foreign-key references before saving, so don&#39;t do this if it&#39;s one of ours.</span>
+                        <span class="n">ts</span><span class="o">.</span><span class="n">serialize</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">a</span><span class="p">))</span>
+                    <span class="n">d</span><span class="p">[</span><span class="n">a</span><span class="p">]</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">a</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+                <span class="k">pass</span>
+<span class="c1">#                 logger.exception(&quot;Exception occured while parsing attr {} of object {}.  NOT STORING.&quot;.format(str(a), str(self)))</span>
+        <span class="k">return</span> <span class="n">d</span>
+<span class="c1"># one-line version that sadly doesn&#39;t work anymore due to a weird django attribute getting added to objects</span>
+<span class="c1">#         return {a:getattr(self,a) for a in dir(self) if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == &#39;_&#39; and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property))}</span>
+
+
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">_hash</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_get_hash_and_range_keys</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">_range</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_get_hash_and_range_keys</span><span class="p">()[</span><span class="mi">1</span><span class="p">])</span>
+
+    <span class="k">def</span> <span class="nf">_get_hash_and_range_keys</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Returns the hash and range key names (not their values).</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">schema</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">SCHEMA</span><span class="p">()</span>
+        <span class="nb">hash</span> <span class="o">=</span> <span class="p">[</span><span class="n">h</span><span class="p">[</span><span class="s1">&#39;AttributeName&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">h</span> <span class="ow">in</span> <span class="n">schema</span><span class="p">[</span><span class="s1">&#39;KeySchema&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">h</span><span class="p">[</span><span class="s1">&#39;KeyType&#39;</span><span class="p">]</span><span class="o">==</span><span class="s1">&#39;HASH&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">ranges</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span><span class="p">[</span><span class="s1">&#39;AttributeName&#39;</span><span class="p">]</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">schema</span><span class="p">[</span><span class="s1">&#39;KeySchema&#39;</span><span class="p">]</span> <span class="k">if</span> <span class="n">r</span><span class="p">[</span><span class="s1">&#39;KeyType&#39;</span><span class="p">]</span><span class="o">==</span><span class="s1">&#39;RANGE&#39;</span><span class="p">]</span>
+        <span class="nb">range</span> <span class="o">=</span> <span class="n">ranges</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">ranges</span> <span class="k">else</span> <span class="bp">None</span>
+        <span class="k">return</span> <span class="nb">hash</span><span class="p">,</span> <span class="nb">range</span>
+
+    <span class="k">def</span> <span class="nf">_extract_hash_and_range</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dictionary</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Returns the hash and range values as a dictionary ready to be passed to client.get_item().</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">dictionary</span><span class="p">:</span>
+            <span class="n">dictionary</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span>
+        <span class="nb">hash</span><span class="p">,</span> <span class="nb">range</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_hash_and_range_keys</span><span class="p">()</span>
+        <span class="n">keys</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">(</span><span class="nb">hash</span><span class="p">,</span> <span class="nb">range</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">k</span> <span class="ow">and</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">dictionary</span><span class="o">.</span><span class="n">keys</span><span class="p">():</span>
+                <span class="n">keys</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="n">dictionary</span><span class="p">[</span><span class="n">k</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">keys</span>
+
+<div class="viewcode-block" id="Object.save"><a class="viewcode-back" href="../../toco.html#toco.object.Object.save">[docs]</a>    <span class="k">def</span> <span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">force</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Saves the item, whether or not it already exists.</span>
+
+<span class="sd">        If force=False (the default) and another location has modified the object since this copy was loaded, it will fail.</span>
+<span class="sd">        If force=True, it will blow away whatever&#39;s in the entry and replace it with this copy.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">old_version</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">VERSION_KEY</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">force</span><span class="p">:</span>
+            <span class="n">CE</span> <span class="o">=</span> <span class="n">Attr</span><span class="p">(</span><span class="n">VERSION_KEY</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="n">old_version</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">[</span><span class="n">VERSION_KEY</span><span class="p">]</span> <span class="o">=</span> <span class="n">old_version</span><span class="o">+</span><span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">in_db</span> <span class="o">=</span> <span class="bp">True</span>
+            <span class="k">if</span> <span class="n">force</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_store</span><span class="p">()</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_store</span><span class="p">(</span><span class="n">CE</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">ClientError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s1">&#39;Update failed: &#39;</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">[</span><span class="n">VERSION_KEY</span><span class="p">]</span> <span class="o">=</span> <span class="n">old_version</span>
+            <span class="k">raise</span> <span class="n">e</span></div>
+
+<div class="viewcode-block" id="Object.update"><a class="viewcode-back" href="../../toco.html#toco.object.Object.update">[docs]</a>    <span class="k">def</span> <span class="nf">update</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">force</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Saves the item, but only if it already exists in the table.</span>
+
+<span class="sd">        If force=False (the default) and another location has modified the object since this copy was loaded, it will fail.</span>
+<span class="sd">        If force=True, it will blow away whatever&#39;s in the entry and replace it with this copy.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">old_version</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">VERSION_KEY</span><span class="p">)</span>
+        <span class="nb">hash</span><span class="p">,</span><span class="nb">range</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_hash_and_range_keys</span><span class="p">()</span>
+        <span class="n">CE</span> <span class="o">=</span> <span class="n">ConditionExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="nb">hash</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">hash</span><span class="p">))</span> <span class="o">&amp;</span> <span class="n">Attr</span><span class="p">(</span><span class="nb">range</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">range</span><span class="p">))</span> <span class="k">if</span> <span class="nb">range</span> <span class="k">else</span> <span class="n">Attr</span><span class="p">(</span><span class="nb">hash</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">hash</span><span class="p">))</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">force</span><span class="p">:</span>
+            <span class="n">CE</span> <span class="o">=</span> <span class="n">CE</span> <span class="o">&amp;</span> <span class="n">Attr</span><span class="p">(</span><span class="n">VERSION_KEY</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="n">old_version</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">in_db</span> <span class="o">=</span> <span class="bp">True</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">[</span><span class="n">VERSION_KEY</span><span class="p">]</span> <span class="o">=</span> <span class="n">old_version</span><span class="o">+</span><span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_store</span><span class="p">(</span><span class="n">CE</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">ClientError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s1">&#39;Update failed: &#39;</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">e</span><span class="p">))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">[</span><span class="n">VERSION_KEY</span><span class="p">]</span> <span class="o">=</span> <span class="n">old_version</span>
+            <span class="k">raise</span> <span class="n">e</span></div>
+
+<div class="viewcode-block" id="Object.create"><a class="viewcode-back" href="../../toco.html#toco.object.Object.create">[docs]</a>    <span class="k">def</span> <span class="nf">create</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Saves the item, but only if it isn&#39;t yet in the table.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="nb">hash</span><span class="p">,</span><span class="nb">range</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_hash_and_range_keys</span><span class="p">()</span>
+        <span class="n">CE</span> <span class="o">=</span> <span class="n">ConditionExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="nb">hash</span><span class="p">)</span><span class="o">.</span><span class="n">ne</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">hash</span><span class="p">))</span> <span class="o">&amp;</span> <span class="n">Attr</span><span class="p">(</span><span class="nb">range</span><span class="p">)</span><span class="o">.</span><span class="n">ne</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">range</span><span class="p">))</span> <span class="k">if</span> <span class="nb">range</span> <span class="k">else</span> <span class="n">Attr</span><span class="p">(</span><span class="nb">hash</span><span class="p">)</span><span class="o">.</span><span class="n">ne</span><span class="p">(</span><span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="nb">hash</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">in_db</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_store</span><span class="p">(</span><span class="n">CE</span><span class="p">)</span></div>
+
+    <span class="k">def</span> <span class="nf">_store</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">CE</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="c1"># Broken out separately so that we can easily manipulate the blob being saved.</span>
+        <span class="n">dict_to_save</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_get_dict</span><span class="p">())</span>
+        <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">[</span><span class="n">k</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_dict</span><span class="p">()</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_get_dict</span><span class="p">()[</span><span class="n">k</span><span class="p">],</span> <span class="n">Object</span><span class="p">)]:</span>
+            <span class="n">fkey</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_dict</span><span class="p">()[</span><span class="n">key</span><span class="p">]</span><span class="o">.</span><span class="n">_foreign_key</span>
+            <span class="n">dict_to_save</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">fkey</span>
+        <span class="n">required</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_required_attributes</span><span class="p">()</span>
+        <span class="n">missing</span> <span class="o">=</span> <span class="p">[</span><span class="n">r</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">required</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">dict_to_save</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">dict_to_save</span><span class="p">[</span><span class="n">r</span><span class="p">]]</span>
+        <span class="k">if</span> <span class="n">missing</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s1">&#39;The following attributes are missing and must be added before saving: &#39;</span><span class="o">+</span><span class="s1">&#39;, &#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">missing</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">CE</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">dict_to_save</span><span class="p">,</span> <span class="n">ConditionExpression</span><span class="o">=</span><span class="n">CE</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">dict_to_save</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Object.reload"><a class="viewcode-back" href="../../toco.html#toco.object.Object.reload">[docs]</a>    <span class="k">def</span> <span class="nf">reload</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">&#39;&#39;&#39;</span>
+<span class="sd">        Reloads the item&#39;s attributes from DynamoDB, replacing whatever&#39;s currently in the object.</span>
+<span class="sd">        &#39;&#39;&#39;</span>
+        <span class="n">description</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_extract_hash_and_range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">description</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;Item&#39;</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">__dict__</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">description</span><span class="p">[</span><span class="s1">&#39;Item&#39;</span><span class="p">])</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">unroll_foreign_keys</span><span class="p">(</span><span class="n">load_depth</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></div></div>
+</pre></div>
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper"><div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  <li><a href="../index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" />
+      <input type="submit" value="Go" />
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+    <p class="searchtip" style="font-size: 90%">
+    Enter search terms or a module, class or function name.
+    </p>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2016, Steve Norum.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.3.5</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.7</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>
