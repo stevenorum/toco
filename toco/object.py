@@ -19,9 +19,12 @@ logger = logging.getLogger(__name__)
 
 def get_class(clazzname):
     '''
-    Dynamically retrieve a class.
+    Dynamically retrieve a class from its name.
 
-    From http://stackoverflow.com/questions/547829/how-to-dynamically-load-a-python-class
+    (From http://stackoverflow.com/questions/547829/how-to-dynamically-load-a-python-class)
+
+    :param clazzname: Name of the class to load.
+    :rtype: Class
     '''
     components = clazzname.split('.')
     mod = __import__(components[0])
@@ -31,18 +34,22 @@ def get_class(clazzname):
 
 def load_object(key, clazzname, recurse=0):
     '''
-    .. function:: load_object(key, clazzname[, recurse=0])
-    
     Load the object with the given key and the given class.
-    
-    :param key: dict containing the keys
-    :param clazzname: name of the class of the object
-    :param recurse: how deeply to load objects.  0 (default) just loads the given object.  1 loads any toco objects it has as attributes, 2 loads theirs, etc.
-    :rtype: Object
+
+    :param key: Dict containing the DynamoDB hash and, if applicable, range keys.  The key names should be the dict keys, and the key values should be the values.
+    :param clazzname: Name of the class of the object.
+    :param recurse: How deeply to load objects.  0 (default) just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
+    :rtype: toco object
     '''
     return get_class(clazzname)(recurse=0, **key)
 
 def is_foreign_key(fkey):
+    '''
+    Determines whether a given object is a toco foreign key, or a string containing a classname and the keys necessary to load an object from DynamoDB.
+
+    :param fkey: An object that may or may not be a toco foreign key.
+    :rtype: toco object
+    '''
     if not isinstance(fkey, str) or not fkey.startswith(FKEY_PREFIX):
         return False
     try:
@@ -57,16 +64,28 @@ def is_foreign_key(fkey):
         return False
 
 def load_from_fkey(fkey):
+    '''
+    If fkey is a toco foreign key, load it from DynamoDB.
+
+    :param fkey: A toco foreign key.
+    :rtype: toco object
+    '''
     if not is_foreign_key(fkey):
         return None
     obj = json.loads(fkey[len(FKEY_PREFIX):])
     return load_object(key=obj['key'], clazzname=obj['class'])
 
-class Object:
+class Object(object):
     '''
     Base class for all DynamoDB-storable toco objects.  Cannot itself be instantiated.
 
     The only thing that a subclass is required to implement is the classmethod SCHEMA, and it must return a dict that can be passed to client.create_table(**schema) and succeed.
+
+    Constructor args:
+
+    :param load_depth: How deeply to load objects.  0 just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 (default) will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
+    :param kwargs: Keys for an object, and any attributes to attach to that object.
+    :rtype: toco object
     '''
     # Convention: all attributes that start with '_' will not be saved.  Attributes that end with '_toco_' are internal to the system and not for direct use by users.
     _STAGE = os.environ.get('TOCO_STAGE')
@@ -83,14 +102,14 @@ class Object:
         pass
 
     def __init__(self, load_depth=1, **kwargs):
-        '''
-
-        '''
         self._client = boto3.client('dynamodb')
         self._get_or_create_table()
 
         self.__dict__[VERSION_KEY] = 0
-        description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
+        try:
+            description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
+        except ResourceNotFoundException as e:
+            description = {}
         self.in_db = False
         if description.get('Item'):
             self.__dict__.update(description['Item'])
@@ -99,6 +118,11 @@ class Object:
         self.unroll_foreign_keys(load_depth=load_depth)
 
     def unroll_foreign_keys(self, load_depth=1):
+        '''
+        Recursively loads from DynamoDB any attributes of the object that are foreign keys.
+
+        :param load_depth: How deep to recursively load.
+        '''
         if load_depth > 0:
             fkeys = [key for key in self.__dict__.keys() if is_foreign_key(getattr(self, key))]
             for key in fkeys:
@@ -108,15 +132,37 @@ class Object:
         # return self so that it can be chained constructor->unroll within a setter
         return self
 
+    @staticmethod
+    def ensure_loaded(obj):
+        if isinstance(obj, Object):
+            return obj
+        elif is_foreign_key(obj):
+            return load_from_fkey(obj)
+        else:
+            return None
+
     @property
     def clazz(self):
+        '''
+        The full class name of this object.
+        '''
         return self.__module__ + "." + self.__class__.__name__
 
     def get_relation_map(self):
+        '''
+        Get a dict containing the classname and necessary lookup keys.
+
+        This dict forms most of the foreign key.
+
+        :rtype: dict
+        '''
         return {'class':self.clazz,'key':self._extract_hash_and_range()}
 
     @property
     def _foreign_key(self):
+        '''
+        The foreign key necessary to load this object from DynamoDB.
+        '''
         return FKEY_PREFIX+json.dumps(self.get_relation_map(), sort_keys=True, separators=(',', ':'))
 
     @classmethod
@@ -139,9 +185,11 @@ class Object:
             TableName = TableName + '_' + str(cls._STAGE)
         return TableName
 
-    def _get_or_create_table(self, stage=None):
+    def _get_or_create_table(self):
         '''
         Create the table needed to store the objects, if it doesn't yet exist.  Either way, return the table.
+
+        :rtype: DynamoDB Table
         '''
         schema = self.SCHEMA()
         schema['TableName'] = self.TABLE_NAME()
@@ -162,6 +210,8 @@ class Object:
     def _get_dict(self):
         '''
         Parses self.__dict__ and returns only those objects that should be stored in the database.
+
+        :rtype: dict
         '''
         ts = TypeSerializer()
         d = {}
@@ -185,10 +235,16 @@ class Object:
 
     @property
     def _hash(self):
+        '''
+        Returns the value of the hash key for this object.
+        '''
         return self.__dict__.get(self._get_hash_and_range_keys()[0])
 
     @property
     def _range(self):
+        '''
+        Returns the value of the range key for this object, or None if there is no range key.
+        '''
         return self.__dict__.get(self._get_hash_and_range_keys()[1])
 
     def _get_hash_and_range_keys(self):
@@ -213,6 +269,18 @@ class Object:
             if k and k in dictionary.keys():
                 keys[k] = dictionary[k]
         return keys
+
+    def create_and_return(self, force=False):
+        self.create(force)
+        return self
+
+    def update_and_return(self, force=False):
+        self.update(force)
+        return self
+
+    def save_and_return(self, force=False):
+        self.save(force)
+        return self
 
     def save(self, force=False):
         '''

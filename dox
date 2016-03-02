@@ -1,7 +1,8 @@
 #!/bin/bash
 
-CUR=`pwd`
+sudo ./setup.py install
 sphinx-apidoc -o docs/source/ toco/
+CUR=`pwd`
 cd docs
 make html
 cd $CUR
