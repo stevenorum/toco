@@ -90,6 +90,7 @@ class Object(object):
     # Convention: all attributes that start with '_' will not be saved.  Attributes that end with '_toco_' are internal to the system and not for direct use by users.
     _STAGE = os.environ.get('TOCO_STAGE')
     _APP = os.environ.get('TOCO_APP')
+    _TABLE = None
     try:
         from django.conf import settings
         _STAGE = settings.TOCO_STAGE
@@ -102,13 +103,14 @@ class Object(object):
         pass
 
     def __init__(self, load_depth=1, **kwargs):
+        self._table = None
         self._client = boto3.client('dynamodb')
         self._get_or_create_table()
 
         self.__dict__[VERSION_KEY] = 0
         try:
             description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
-        except ResourceNotFoundException as e:
+        except ClientError as e:
             description = {}
         self.in_db = False
         if description.get('Item'):
@@ -172,25 +174,35 @@ class Object(object):
         '''
         return getattr(cls, 'REQUIRED_ATTRS', [])
 
-    @classmethod
-    def TABLE_NAME(cls):
+    def TABLE_NAME(self):
         '''
         Returns the name of table for the object by pulling it from cls.SCHEMA.  Includes stage and app name, if available from settings or environment variables.
         '''
-        schema = cls.SCHEMA()
+        schema = self.SCHEMA()
         TableName = schema.get('TableName')
-        if cls._APP:
-            TableName = TableName + '_' + str(cls._APP)
-        if cls._STAGE:
-            TableName = TableName + '_' + str(cls._STAGE)
+        if self._APP:
+            TableName = TableName + '_' + str(self._APP)
+        if self._STAGE:
+            TableName = TableName + '_' + str(self._STAGE)
         return TableName
 
-    def _get_or_create_table(self):
+    def _get_or_create_table(self, use_cache=True, update_class=False):
         '''
         Create the table needed to store the objects, if it doesn't yet exist.  Either way, return the table.
 
         :rtype: DynamoDB Table
         '''
+        if use_cache:
+            if self._table:
+                return self._table
+            elif self.__class__._TABLE:
+                return self.__class__._TABLE
+        self._table = self._get_or_create_table_inner()
+        if update_class:
+            self.__class__._TABLE = self._table
+        return self._table
+
+    def _get_or_create_table_inner(self):
         schema = self.SCHEMA()
         schema['TableName'] = self.TABLE_NAME()
         try:
@@ -198,9 +210,8 @@ class Object(object):
         except ClientError as e:
             logging.exception('')
             self._client.create_table(**schema)
-        self._table = boto3.resource('dynamodb').Table(self.TABLE_NAME())
+        return boto3.resource('dynamodb').Table(self.TABLE_NAME())
 
-    @classmethod
     def SCHEMA(self):
         '''
         Returns the full table schema needed to create it in DynamoDB, as a dict.
@@ -357,3 +368,98 @@ class Object(object):
         if description.get('Item'):
             self.__dict__.update(description['Item'])
             self.unroll_foreign_keys(load_depth=1)
+
+class CFObject(Object):
+    '''
+    Base class for toco objects that are based on tables created in a CloudFormation stack.
+    '''
+
+    _CF_STACK_NAME = None
+    _CF_LOGICAL_NAME = None
+
+    @classmethod
+    def set_cf_info(cls, cf_stack_name=None, cf_logical_name=None):
+        if cf_stack_name:
+            cls._CF_STACK_NAME = cf_stack_name
+        if cf_logical_name:
+            cls._LOGICAL_NAME = cf_logical_name
+
+    def _get_cf_stack_name(self):
+        return self._cf_stack_name if self._cf_stack_name else self._CF_STACK_NAME
+
+    def _get_cf_logical_name(self):
+        return self._cf_logical_name if self._cf_logical_name else self._CF_LOGICAL_NAME
+
+    def __init__(self, _cf_stack_name=None, _cf_logical_name=None, *args, **kwargs):
+        self._cf_client = boto3.client('cloudformation')
+        self._cf_stack_name = _cf_stack_name
+        self._cf_logical_name = _cf_logical_name
+        super().__init__(*args, **kwargs)
+
+    def _get_stack_name(self, stack_name=None):
+        stack_name = stack_name if stack_name else self._get_cf_stack_name()
+        if not stack_name:
+            raise RuntimeError("Stack name not set!")
+        return stack_name
+
+    def _get_stack_and_logical_names(self, stack_name=None, logical_name=None):
+        stack_name = stack_name if stack_name else self._get_cf_stack_name()
+        logical_name = logical_name if logical_name else self._get_cf_logical_name()
+        if not stack_name or not logical_name:
+            raise RuntimeError("Stack name or logical name (or both) not set!")
+        return stack_name, logical_name
+
+    def _describe_stack_resource(self, stack_name=None, logical_name=None):
+        stack_name, logical_name = self._get_stack_and_logical_names(stack_name=stack_name, logical_name=logical_name)
+        response = self._cf_client.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_name)
+        if not response or "StackResourceDetail" not in response:
+            raise RuntimeError("Resource does not exist!")
+        return response["StackResourceDetail"]
+
+    def _get_physical_resource_id(self, stack_name=None, logical_name=None):
+        return self._describe_stack_resource(stack_name=stack_name, logical_name=logical_name)["PhysicalResourceId"]
+
+    def _get_template(self, stack_name=None):
+        stack_name = self._get_stack_name(stack_name=stack_name)
+        try:
+            template = self._cf_client.get_template(StackName=stack_name)["TemplateBody"]
+        except ValidationError:
+            raise RuntimeError("Unable to retrieve template for stack {}, likely due to it not existing.".format(stack_name))
+        return template
+
+    def SCHEMA(self):
+        stack_name, logical_name = self._get_stack_and_logical_names()
+        template = self._get_template(stack_name=stack_name)
+        resources = template["Resources"]
+        if logical_name not in resources:
+            raise RuntimeError("Stack doesn't contain a table with the given logical name!")
+        resource = resources[logical_name]
+        table_type = "AWS::DynamoDB::Table"
+        if not table_type == resource["Type"]:
+            raise RuntimeError("Logical resource {} in stack {} is of type '{}', not type '{}'".format(logical_name, stack_name, resource["Type"], table_type))
+        properties = resource["Properties"]
+        return properties
+
+    def TABLE_NAME(self):
+        return self._get_physical_resource_id()
+
+    def _get_or_create_table_inner(self):
+        table_name = self.TABLE_NAME()
+        try:
+            description = self._client.describe_table(TableName=table_name)
+        except ClientError as e:
+            raise RuntimeError("Table {} does not exist!".format(table_name))
+        return boto3.resource('dynamodb').Table(table_name)
+
+    @classmethod
+    def lazysubclass(cls, stack_name=None, logical_name=None):
+        '''
+        Returns a class that inherits from this one, with the given default stack and logical names.
+        If you just want to have a new object type with no fancy features added, this makes it a one-liner.
+
+        :rtype: Class that inherits from cls
+        '''
+        class LazyObject(cls):
+            _CF_STACK_NAME = stack_name if stack_name else cls._CF_STACK_NAME
+            _CF_LOGICAL_NAME = logical_name if logical_name else cls._CF_LOGICAL_NAME
+        return LazyObject
