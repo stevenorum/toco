@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3A
 
 from botocore.exceptions import *
-from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.conditions import Key, Attr, Or
 from boto3.dynamodb.types import TypeSerializer
 import boto3
 import copy
@@ -32,7 +32,7 @@ def get_class(clazzname):
         mod = getattr(mod, comp)
     return mod
 
-def load_object(key, clazzname, recurse=0):
+def load_object(clazzname, recurse=0, **kwargs):
     '''
     Load the object with the given key and the given class.
 
@@ -41,7 +41,7 @@ def load_object(key, clazzname, recurse=0):
     :param recurse: How deeply to load objects.  0 (default) just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
     :rtype: toco object
     '''
-    return get_class(clazzname)(recurse=0, **key)
+    return get_class(clazzname)(recurse=0, **kwargs)
 
 def is_foreign_key(fkey):
     '''
@@ -73,7 +73,12 @@ def load_from_fkey(fkey):
     if not is_foreign_key(fkey):
         return None
     obj = json.loads(fkey[len(FKEY_PREFIX):])
-    return load_object(key=obj['key'], clazzname=obj['class'])
+    key = obj['key']
+    clazzname = obj['class']
+    del obj['key']
+    del obj['class']
+    obj.update(key)
+    return load_object(clazzname=clazzname, **obj)
 
 class Object(object):
     '''
@@ -91,6 +96,7 @@ class Object(object):
     _STAGE = os.environ.get('TOCO_STAGE')
     _APP = os.environ.get('TOCO_APP')
     _TABLE = None
+    _CLASSNAME = None
     try:
         from django.conf import settings
         _STAGE = settings.TOCO_STAGE
@@ -143,22 +149,29 @@ class Object(object):
         else:
             return None
 
-    @property
-    def clazz(self):
-        '''
-        The full class name of this object.
-        '''
-        return self.__module__ + "." + self.__class__.__name__
+    @classmethod
+    def get_classname(cls):
+        return cls._CLASSNAME if cls._CLASSNAME else "{module}.{name}".format(module=cls.__module__, name=cls.__name__)
 
     def get_relation_map(self):
-        '''
-        Get a dict containing the classname and necessary lookup keys.
+        classes = []
+        new_classes = [self.__class__]
+        has_method = True
+        while new_classes:
+            bases = []
+            for clazz in new_classes:
+                if clazz not in classes and hasattr(clazz, "_get_relation_map"):
+                    classes.append(clazz)
+                    bases.extend(clazz.__bases__)
+            new_classes = bases
+        relation_map = {}
+        for clazz in classes[::-1]:
+            relation_map.update(clazz._get_relation_map(self))
+        return relation_map
 
-        This dict forms most of the foreign key.
-
-        :rtype: dict
-        '''
-        return {'class':self.clazz,'key':self._extract_hash_and_range()}
+    @classmethod
+    def _get_relation_map(cls, obj):
+        return {'class':cls.get_classname(), 'key':obj._extract_hash_and_range()}
 
     @property
     def _foreign_key(self):
@@ -302,7 +315,7 @@ class Object(object):
         '''
         old_version = self.__dict__.get(VERSION_KEY)
         if not force:
-            CE = Attr(VERSION_KEY).eq(old_version)
+            CE = Or(Attr(VERSION_KEY).eq(old_version), Attr(VERSION_KEY).not_exists())
         try:
             self.__dict__[VERSION_KEY] = old_version+1
             self.in_db = True
@@ -314,6 +327,7 @@ class Object(object):
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
             raise e
+        return self
 
     def update(self, force=False):
         '''
@@ -335,6 +349,7 @@ class Object(object):
             print('Update failed: ' + str(e))
             self.__dict__[VERSION_KEY] = old_version
             raise e
+        return self
 
     def create(self):
         '''
@@ -344,6 +359,7 @@ class Object(object):
         CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
         self.in_db = True
         self._store(CE)
+        return self
 
     def _store(self, CE=None):
         # Broken out separately so that we can easily manipulate the blob being saved.
@@ -359,6 +375,7 @@ class Object(object):
             self._table.put_item(Item=dict_to_save, ConditionExpression=CE)
         else:
             self._table.put_item(Item=dict_to_save)
+        return self
 
     def reload(self):
         '''
@@ -368,6 +385,7 @@ class Object(object):
         if description.get('Item'):
             self.__dict__.update(description['Item'])
             self.unroll_foreign_keys(load_depth=1)
+        return self
 
 class CFObject(Object):
     '''
@@ -452,6 +470,11 @@ class CFObject(Object):
         return boto3.resource('dynamodb').Table(table_name)
 
     @classmethod
+    def _get_relation_map(cls, obj):
+        stack_name, logical_name = obj._get_stack_and_logical_names()
+        return {'class':cls.get_classname(), '_cf_stack_name':stack_name, '_cf_logical_name':logical_name}
+
+    @classmethod
     def lazysubclass(cls, stack_name=None, logical_name=None):
         '''
         Returns a class that inherits from this one, with the given default stack and logical names.
@@ -462,4 +485,5 @@ class CFObject(Object):
         class LazyObject(cls):
             _CF_STACK_NAME = stack_name if stack_name else cls._CF_STACK_NAME
             _CF_LOGICAL_NAME = logical_name if logical_name else cls._CF_LOGICAL_NAME
+            _CLASSNAME = cls.get_classname()
         return LazyObject
