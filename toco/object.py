@@ -99,8 +99,6 @@ class BaseTocoObject(object):
         # re-add the padding
         key = key + "=" * ((-1*len(key))%16)
         # convert if back from base64-encoded bytes to the underlying string
-        print(key)
-        print(len(key))
         key = base64.urlsafe_b64decode(key.encode("utf-8")).decode("utf-8")
         # load the string back into a dict
         # This won't work for a lot of valid keys due to the json serialization step
