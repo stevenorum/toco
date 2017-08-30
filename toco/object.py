@@ -121,6 +121,7 @@ class BaseTocoObject(object):
         params = dict(kwargs)
         if params.get("NextToken", None) and not params.get("ExclusiveStartKey", None):
             params["ExclusiveStartKey"] = cls._decode_nexttoken(params["NextToken"])
+        if "NextToken" in params:
             del params["NextToken"]
         return params
 
