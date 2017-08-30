@@ -1,14 +1,17 @@
 #!/usr/bin/env python3A
 
+import base64
 from botocore.exceptions import *
 from boto3.dynamodb.conditions import Key, Attr, Or
 from boto3.dynamodb.types import TypeSerializer
 import boto3
+from calvin import caljson
 import copy
 import inspect
 import json
 import logging
 import os
+import traceback
 
 VERSION_KEY = 'version_toco_'
 
@@ -31,17 +34,6 @@ def get_class(clazzname):
     for comp in components[1:]:
         mod = getattr(mod, comp)
     return mod
-
-def load_object(clazzname, recurse=0, **kwargs):
-    '''
-    Load the object with the given key and the given class.
-
-    :param key: Dict containing the DynamoDB hash and, if applicable, range keys.  The key names should be the dict keys, and the key values should be the values.
-    :param clazzname: Name of the class of the object.
-    :param recurse: How deeply to load objects.  0 (default) just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
-    :rtype: toco object
-    '''
-    return get_class(clazzname)(recurse=0, **kwargs)
 
 def is_foreign_key(fkey):
     '''
@@ -78,9 +70,143 @@ def load_from_fkey(fkey):
     del obj['key']
     del obj['class']
     obj.update(key)
-    return load_object(clazzname=clazzname, **obj)
+    return get_class(clazzname)._from_fkey(**obj)
 
-class Object(object):
+class BaseTocoObject(object):
+    """
+    Holder class for a bunch of class methods and stuff like that.
+    """
+    _SCHEMA_CACHE = None
+    _TABLE_CACHE = None
+    _CLASSNAME = None
+    _REQUIRED_ATTRS = []
+
+    @classmethod
+    def _encode_nexttoken(cls, key):
+        # TODO: replace the json step with something that'll work for any input
+        # Convert to a string
+        # This won't work for a lot of valid keys due to the json serialization step
+        key = caljson.dumps(key)
+        # base64 encode it to make it safer to handle
+        key = base64.urlsafe_b64encode(key.encode("utf-8")).decode("utf-8")
+        # strip the padding, as we can easily re-add it later
+        key = key.replace("=","")
+        return key
+
+    @classmethod
+    def _decode_nexttoken(cls, key):
+        # TODO: replace the json step with something that'll work for any input
+        # re-add the padding
+        key = key + "=" * ((-1*len(key))%16)
+        # convert if back from base64-encoded bytes to the underlying string
+        print(key)
+        print(len(key))
+        key = base64.urlsafe_b64decode(key.encode("utf-8")).decode("utf-8")
+        # load the string back into a dict
+        # This won't work for a lot of valid keys due to the json serialization step
+        key = caljson.loads(key)
+        return key
+
+    @classmethod
+    def _parse_items(cls, response):
+        items = []
+        for item in response.get("Items",[]):
+            params = dict(item)
+            params["_in_db"] = True
+            params["_attempt_load"] = False
+            params["_load_depth"] = 0
+            items.append(cls(**params))
+        return items
+
+    @classmethod
+    def _preprocess_search_params(cls, **kwargs):
+        params = dict(kwargs)
+        if params.get("NextToken", None) and not params.get("ExclusiveStartKey", None):
+            params["ExclusiveStartKey"] = cls._decode_nexttoken(params["NextToken"])
+            del params["NextToken"]
+        return params
+
+    @classmethod
+    def _postprocess_search_results(cls, results):
+        response = {
+            "Items":cls._parse_items(results),
+            "NextToken":None,
+            "RawResponse":results
+        }
+        if results.get("LastEvaluatedKey", None):
+            response["NextToken"] = cls._encode_nexttoken(results["LastEvaluatedKey"])
+        return response
+
+    @classmethod
+    def SCHEMA(cls, use_cache=True):
+        if cls._SCHEMA_CACHE and use_cache:
+            return cls._SCHEMA_CACHE
+        schema = cls._SCHEMA()
+        cls._SCHEMA_CACHE = schema
+        return schema
+
+    @classmethod
+    def _SCHEMA(cls, use_cache=True):
+        raise NotImplementedError("Each subclass must implement this on their own.")
+
+    @classmethod
+    def TABLE_NAME(cls, use_cache=True):
+        schema = cls.SCHEMA(use_cache=use_cache)
+        return schema.get('TableName')
+
+    @classmethod
+    def CLASS_NAME(cls):
+        return cls._CLASSNAME if cls._CLASSNAME else "{module}.{name}".format(module=cls.__module__, name=cls.__name__)
+
+    @classmethod
+    def TABLE(cls):
+        if not cls._TABLE_CACHE:
+            cls._TABLE_CACHE = boto3.resource('dynamodb').Table(cls.TABLE_NAME())
+        return cls._TABLE_CACHE
+
+    @classmethod
+    def create_table(cls):
+        boto3.client("dynamodb").create_table(**cls._SCHEMA())
+
+    @classmethod
+    def scan(cls, **kwargs):
+        params = cls._preprocess_search_params(**kwargs)
+        results = cls.TABLE().scan(**params)
+        return cls._postprocess_search_results(results)
+
+    @classmethod
+    def query(cls, **kwargs):
+        params = cls._preprocess_search_params(**kwargs)
+        results = cls().TABLE().query(**params)
+        return cls._postprocess_search_results(results)
+
+    @classmethod
+    def _get_required_attributes(cls):
+        attrs = []
+        hashkn, rangekn = cls._HASH_AND_RANGE_KEYS()
+        if hashkn:
+            attrs.append(hashkn)
+        if rangekn:
+            attrs.append(rangekn)
+        attrs.extend(cls._REQUIRED_ATTRS)
+        return attrs
+
+    @classmethod
+    def _HASH_AND_RANGE_KEYS(cls):
+        hash = [h['AttributeName'] for h in cls._SCHEMA()['KeySchema'] if h['KeyType']=='HASH'][0]
+        ranges = [r['AttributeName'] for r in cls._SCHEMA()['KeySchema'] if r['KeyType']=='RANGE']
+        range = ranges[0] if ranges else None
+        return hash, range
+
+    @classmethod
+    def _get_class_relation_map(cls, obj):
+        return {'class':cls.CLASS_NAME(), 'key':obj._get_key_dict()}
+
+    @classmethod
+    def _from_fkey(cls, **kwargs):
+        return cls(**kwargs)
+
+class TocoObject(BaseTocoObject):
     '''
     Base class for all DynamoDB-storable toco objects.  Cannot itself be instantiated.
 
@@ -88,366 +214,237 @@ class Object(object):
 
     Constructor args:
 
-    :param load_depth: How deeply to load objects.  0 just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 (default) will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
+    :param _load_depth: How deeply to load objects.  0 just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 (default) will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
     :param kwargs: Keys for an object, and any attributes to attach to that object.
     :rtype: toco object
     '''
-    # Convention: all attributes that start with '_' will not be saved.  Attributes that end with '_toco_' are internal to the system and not for direct use by users.
-    _STAGE = os.environ.get('TOCO_STAGE')
-    _APP = os.environ.get('TOCO_APP')
-    _TABLE = None
-    _CLASSNAME = None
-    try:
-        from django.conf import settings
-        _STAGE = settings.TOCO_STAGE
-    except BaseException as e:
-        pass
-    try:
-        from django.conf import settings
-        _APP = settings.TOCO_APP
-    except BaseException as e:
-        pass
+    def __init__(self, _in_db=False, _attempt_load=True, **kwargs):
+        self._obj_dict = {}
+        self._fkey_cache = {}
+        self._obj_loaded = {}
+        self._obj_updates = {}
 
-    def __init__(self, load_depth=1, **kwargs):
-        self._table = None
-        self._client = boto3.client('dynamodb')
-        self._get_or_create_table()
+        setattr(self, VERSION_KEY, 0)
+        self._in_db = _in_db
 
-        self.__dict__[VERSION_KEY] = 0
-        try:
-            description = self._table.get_item(Key=self._extract_hash_and_range(kwargs))
-        except ClientError as e:
-            description = {}
-        self.in_db = False
-        if description.get('Item'):
-            self.__dict__.update(description['Item'])
-            self.in_db = True
-        self.__dict__.update(kwargs)
-        self.unroll_foreign_keys(load_depth=load_depth)
+        if _attempt_load:
+            try:
+                description = self.__class__.TABLE().get_item(Key=self._get_key_dict(kwargs))
+            except ClientError as e:
+                description = {}
+            if description.get('Item'):
+                self._update_attrs(**description['Item'])
+                self._clear_update_record()
+                self._in_db = True
+        self._update_attrs(**kwargs)
 
-    def unroll_foreign_keys(self, load_depth=1):
-        '''
-        Recursively loads from DynamoDB any attributes of the object that are foreign keys.
-
-        :param load_depth: How deep to recursively load.
-        '''
-        if load_depth > 0:
-            fkeys = [key for key in self.__dict__.keys() if is_foreign_key(getattr(self, key))]
-            for key in fkeys:
-                fkey = getattr(self, key)
-                # load the object and also recurse
-                setattr(self, key, load_from_fkey(fkey).unroll_foreign_keys(load_depth=load_depth-1))
-        # return self so that it can be chained constructor->unroll within a setter
-        return self
-
-    @staticmethod
-    def ensure_loaded(obj):
-        if isinstance(obj, Object):
-            return obj
-        elif is_foreign_key(obj):
-            return load_from_fkey(obj)
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
         else:
-            return None
+            if isinstance(value, TocoObject):
+                self._obj_dict[name] = value._foreign_key()
+                self._fkey_cache[name] = value
+            else:
+                self._obj_dict[name] = value
+                if name in self._fkey_cache:
+                    del self._fkey_cache[name]
+            self._obj_updates[name] = value
 
-    @classmethod
-    def get_classname(cls):
-        return cls._CLASSNAME if cls._CLASSNAME else "{module}.{name}".format(module=cls.__module__, name=cls.__name__)
+    def __getattribute__(self, name):
+        if name.startswith("_") or name not in self._obj_dict:
+            if name in object.__getattribute__(self, "__dict__"):
+                return object.__getattribute__(self, "__dict__").get(name)
+            return object.__getattribute__(self, name)
+        else:
+            value = self._obj_dict[name]
+            if is_foreign_key(value):
+                obj = load_from_fkey(value)
+                self._fkey_cache[name] = obj
+                return obj
+            else:
+                return self._obj_dict[name]
 
-    def get_relation_map(self):
+    def __delattr__(self, name):
+        if name in self._obj_dict:
+            del self._obj_dict[name]
+            if name in self._fkey_cache:
+                del self._fkey_cache[name]
+            self._obj_updates[name] = None
+        else:
+            object.__delattr__(self, name)
+
+    def _update_attrs(self, **kwargs):
+        for k in kwargs:
+            setattr(self, k, kwargs[k])
+
+    def _clear_update_record(self):
+        self._obj_loaded = self._obj_dict
+        self._obj_updates = {}
+
+    def _my_hash_and_range(self):
+        hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
+        hash_key = getattr(self, hash_keyname)
+        range_key = getattr(self, range_keyname) if range_keyname else None
+        return hash_key, range_key
+
+    def _get_key_dict(self, dictionary=None):
+        hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
+        keys = {}
+        dictionary = dictionary if dictionary else self._obj_dict
+        for k in (hash_keyname, range_keyname):
+            if k and k in dictionary.keys():
+                # I'm explicitly bypassing the getter here in the off chance either hash or range is a foreign key
+                keys[k] = dictionary[k]
+        return keys
+
+    def _get_relation_map(self):
         classes = []
         new_classes = [self.__class__]
         has_method = True
         while new_classes:
             bases = []
             for clazz in new_classes:
-                if clazz not in classes and hasattr(clazz, "_get_relation_map"):
+                if clazz not in classes and hasattr(clazz, "_get_class_relation_map"):
                     classes.append(clazz)
                     bases.extend(clazz.__bases__)
             new_classes = bases
         relation_map = {}
         for clazz in classes[::-1]:
-            relation_map.update(clazz._get_relation_map(self))
+            relation_map.update(clazz._get_class_relation_map(self))
         return relation_map
 
-    @classmethod
-    def _get_relation_map(cls, obj):
-        return {'class':cls.get_classname(), 'key':obj._extract_hash_and_range()}
-
-    @property
     def _foreign_key(self):
         '''
         The foreign key necessary to load this object from DynamoDB.
         '''
-        return FKEY_PREFIX+json.dumps(self.get_relation_map(), sort_keys=True, separators=(',', ':'))
+        return FKEY_PREFIX+json.dumps(self._get_relation_map(), sort_keys=True, separators=(',', ':'))
 
-    @classmethod
-    def get_required_attributes(cls):
-        '''
-        Returns all attributes that are required for an object to be saved but that aren't called out in the main schema as hash or range keys.
-        '''
-        return getattr(cls, 'REQUIRED_ATTRS', [])
+    def _save(self, force=False, save_if_missing=True, save_if_existing=True):
+        if not save_if_missing and not save_if_existing:
+            raise RuntimeError("At least one of save_if_missing and save_if_existing must be true.")
 
-    def TABLE_NAME(self):
-        '''
-        Returns the name of table for the object by pulling it from cls.SCHEMA.  Includes stage and app name, if available from settings or environment variables.
-        '''
-        schema = self.SCHEMA()
-        TableName = schema.get('TableName')
-        if self._APP:
-            TableName = TableName + '_' + str(self._APP)
-        if self._STAGE:
-            TableName = TableName + '_' + str(self._STAGE)
-        return TableName
-
-    def _get_or_create_table(self, use_cache=True, update_class=False):
-        '''
-        Create the table needed to store the objects, if it doesn't yet exist.  Either way, return the table.
-
-        :rtype: DynamoDB Table
-        '''
-        if use_cache:
-            if self._table:
-                return self._table
-            elif self.__class__._TABLE:
-                return self.__class__._TABLE
-        self._table = self._get_or_create_table_inner()
-        if update_class:
-            self.__class__._TABLE = self._table
-        return self._table
-
-    def _get_or_create_table_inner(self):
-        schema = self.SCHEMA()
-        schema['TableName'] = self.TABLE_NAME()
+        old_version = getattr(self, VERSION_KEY)
+        create_condition = Attr(VERSION_KEY).not_exists()
+        if force:
+            update_condition = Attr(VERSION_KEY).exists()
+        else:
+            update_condition = Attr(VERSION_KEY).eq(old_version)
+        CE = None
+        if force and save_if_missing and save_if_exsting:
+            pass
+        elif save_if_missing and save_if_existing:
+            CE = Or(create_condition, update_condition)
+        elif save_if_existing:
+            CE = update_condition
+        else:
+            # If we're here, we know that create_condition=True
+            CE = create_condition
         try:
-            description = self._client.describe_table(TableName=self.TABLE_NAME())
-        except ClientError as e:
-            logging.exception('')
-            self._client.create_table(**schema)
-        return boto3.resource('dynamodb').Table(self.TABLE_NAME())
-
-    def SCHEMA(self):
-        '''
-        Returns the full table schema needed to create it in DynamoDB, as a dict.
-        '''
-        raise NotImplementedError("Each subclass must implement this on their own.")
-
-    def _get_dict(self):
-        '''
-        Parses self.__dict__ and returns only those objects that should be stored in the database.
-
-        :rtype: dict
-        '''
-        ts = TypeSerializer()
-        d = {}
-        for a in [k for k in dir(self) if k not in dir(type(self))]:
-            # limited to only instance attributes, not class attributes
-            try:
-                if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property)):
-                    if not isinstance(getattr(self,a), Object):
-                        # if DDB will choke on the data type, this will throw an error and prevent it from getting added to the dict
-                        # however, we convert Objects to foreign-key references before saving, so don't do this if it's one of ours.
-                        ts.serialize(getattr(self,a))
-                    d[a] = getattr(self,a)
-            except Exception as e:
-                pass
-#                 logger.exception("Exception occured while parsing attr {} of object {}.  NOT STORING.".format(str(a), str(self)))
-        return d
-# one-line version that sadly doesn't work anymore due to a weird django attribute getting added to objects
-#         return {a:getattr(self,a) for a in dir(self) if not inspect.ismethod(getattr(self,a)) and not inspect.isfunction(getattr(self,a)) and not a[0] == '_' and not (hasattr(type(self),a) and isinstance(getattr(type(self),a), property))}
-
-
-
-    @property
-    def _hash(self):
-        '''
-        Returns the value of the hash key for this object.
-        '''
-        return self.__dict__.get(self._get_hash_and_range_keys()[0])
-
-    @property
-    def _range(self):
-        '''
-        Returns the value of the range key for this object, or None if there is no range key.
-        '''
-        return self.__dict__.get(self._get_hash_and_range_keys()[1])
-
-    def _get_hash_and_range_keys(self):
-        '''
-        Returns the hash and range key names (not their values).
-        '''
-        schema = self.SCHEMA()
-        hash = [h['AttributeName'] for h in schema['KeySchema'] if h['KeyType']=='HASH'][0]
-        ranges = [r['AttributeName'] for r in schema['KeySchema'] if r['KeyType']=='RANGE']
-        range = ranges[0] if ranges else None
-        return hash, range
-
-    def _extract_hash_and_range(self, dictionary=None):
-        '''
-        Returns the hash and range values as a dictionary ready to be passed to client.get_item().
-        '''
-        if not dictionary:
-            dictionary = self.__dict__
-        hash, range = self._get_hash_and_range_keys()
-        keys = {}
-        for k in (hash, range):
-            if k and k in dictionary.keys():
-                keys[k] = dictionary[k]
-        return keys
-
-    def create_and_return(self, force=False):
-        self.create(force)
-        return self
-
-    def update_and_return(self, force=False):
-        self.update(force)
-        return self
-
-    def save_and_return(self, force=False):
-        self.save(force)
-        return self
-
-    def save(self, force=False):
-        '''
-        Saves the item, whether or not it already exists.
-
-        If force=False (the default) and another location has modified the object since this copy was loaded, it will fail.
-        If force=True, it will blow away whatever's in the entry and replace it with this copy.
-        '''
-        old_version = self.__dict__.get(VERSION_KEY)
-        if not force:
-            CE = Or(Attr(VERSION_KEY).eq(old_version), Attr(VERSION_KEY).not_exists())
-        try:
-            self.__dict__[VERSION_KEY] = old_version+1
-            self.in_db = True
-            if force:
-                self._store()
-            else:
+            setattr(self, VERSION_KEY, old_version+1)
+            if CE:
                 self._store(CE)
+            else:
+                self._store()
+            self._clear_update_record()
+            self._in_db = True
+            return self
         except ClientError as e:
-            print('Update failed: ' + str(e))
-            self.__dict__[VERSION_KEY] = old_version
+            setattr(self, VERSION_KEY, old_version)
             raise e
-        return self
 
-    def update(self, force=False):
-        '''
-        Saves the item, but only if it already exists in the table.
+    def _update(self, force=False):
+        return self._save(force=force, save_if_existing=True, save_if_missing=False)
 
-        If force=False (the default) and another location has modified the object since this copy was loaded, it will fail.
-        If force=True, it will blow away whatever's in the entry and replace it with this copy.
-        '''
-        old_version = self.__dict__.get(VERSION_KEY)
-        hash,range = self._get_hash_and_range_keys()
-        CE = ConditionExpression=Attr(hash).eq(getattr(self,hash)) & Attr(range).eq(getattr(self,range)) if range else Attr(hash).eq(getattr(self,hash))
-        if not force:
-            CE = CE & Attr(VERSION_KEY).eq(old_version)
-        try:
-            self.in_db = True
-            self.__dict__[VERSION_KEY] = old_version+1
-            self._store(CE)
-        except ClientError as e:
-            print('Update failed: ' + str(e))
-            self.__dict__[VERSION_KEY] = old_version
-            raise e
-        return self
-
-    def create(self):
-        '''
-        Saves the item, but only if it isn't yet in the table.
-        '''
-        hash,range = self._get_hash_and_range_keys()
-        CE = ConditionExpression=Attr(hash).ne(getattr(self,hash)) & Attr(range).ne(getattr(self,range)) if range else Attr(hash).ne(getattr(self,hash))
-        self.in_db = True
-        self._store(CE)
-        return self
+    def _create(self):
+        return self._save(force=force, save_if_existing=False, save_if_missing=True)
 
     def _store(self, CE=None):
         # Broken out separately so that we can easily manipulate the blob being saved.
-        dict_to_save = copy.copy(self._get_dict())
-        for key in [k for k in self._get_dict().keys() if isinstance(self._get_dict()[k], Object)]:
-            fkey = self._get_dict()[key]._foreign_key
-            dict_to_save[key] = fkey
-        required = self.get_required_attributes()
+        dict_to_save = copy.copy(self._obj_dict)
+        # for key in [k for k in self.obj_dict.keys() if isinstance(self.obj_dict[k], TocoObject)]:
+        #     fkey = self._obj_dict[key]._foreign_key
+        #     dict_to_save[key] = fkey
+        required = self._get_required_attributes()
         missing = [r for r in required if not r in dict_to_save or not dict_to_save[r]]
         if missing:
             raise RuntimeError('The following attributes are missing and must be added before saving: '+', '.join(missing))
         if CE:
-            self._table.put_item(Item=dict_to_save, ConditionExpression=CE)
+            self.__class__.TABLE().put_item(Item=dict_to_save, ConditionExpression=CE)
         else:
-            self._table.put_item(Item=dict_to_save)
+            self.__class__.TABLE().put_item(Item=dict_to_save)
         return self
 
-    def reload(self):
+    def _load(self):
+        return self.__class__.TABLE().get_item(Key=self._extract_hash_and_range(self._obj_dict)).get("Item", {})
+
+    def _reload(self):
         '''
         Reloads the item's attributes from DynamoDB, replacing whatever's currently in the object.
         '''
-        description = self._table.get_item(Key=self._extract_hash_and_range(self.__dict__))
-        if description.get('Item'):
-            self.__dict__.update(description['Item'])
-            self.unroll_foreign_keys(load_depth=1)
+        self._obj_dict = self._load()
+        self._clear_update_record()
         return self
 
-class CFObject(Object):
+class CFObject(TocoObject):
     '''
     Base class for toco objects that are based on tables created in a CloudFormation stack.
     '''
 
     _CF_STACK_NAME = None
     _CF_LOGICAL_NAME = None
+    _CF_CLIENT = boto3.client('cloudformation')
 
     @classmethod
-    def set_cf_info(cls, cf_stack_name=None, cf_logical_name=None):
+    def _set_cf_info(cls, cf_stack_name=None, cf_logical_name=None):
         if cf_stack_name:
             cls._CF_STACK_NAME = cf_stack_name
         if cf_logical_name:
             cls._LOGICAL_NAME = cf_logical_name
 
-    def _get_cf_stack_name(self):
-        return self._cf_stack_name if self._cf_stack_name else self._CF_STACK_NAME
-
-    def _get_cf_logical_name(self):
-        return self._cf_logical_name if self._cf_logical_name else self._CF_LOGICAL_NAME
-
-    def __init__(self, _cf_stack_name=None, _cf_logical_name=None, *args, **kwargs):
-        self._cf_client = boto3.client('cloudformation')
-        self._cf_stack_name = _cf_stack_name
-        self._cf_logical_name = _cf_logical_name
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def _get_stack_name(self, stack_name=None):
-        stack_name = stack_name if stack_name else self._get_cf_stack_name()
+    @classmethod
+    def _get_stack_name(cls, stack_name=None):
+        stack_name = stack_name if stack_name else cls._CF_STACK_NAME
         if not stack_name:
             raise RuntimeError("Stack name not set!")
         return stack_name
 
-    def _get_stack_and_logical_names(self, stack_name=None, logical_name=None):
-        stack_name = stack_name if stack_name else self._get_cf_stack_name()
-        logical_name = logical_name if logical_name else self._get_cf_logical_name()
+    @classmethod
+    def _get_stack_and_logical_names(cls, stack_name=None, logical_name=None):
+        stack_name = stack_name if stack_name else cls._CF_STACK_NAME
+        logical_name = logical_name if logical_name else cls._CF_LOGICAL_NAME
         if not stack_name or not logical_name:
             raise RuntimeError("Stack name or logical name (or both) not set!")
         return stack_name, logical_name
 
-    def _describe_stack_resource(self, stack_name=None, logical_name=None):
-        stack_name, logical_name = self._get_stack_and_logical_names(stack_name=stack_name, logical_name=logical_name)
-        response = self._cf_client.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_name)
+    @classmethod
+    def _describe_stack_resource(cls, stack_name=None, logical_name=None):
+        stack_name, logical_name = cls._get_stack_and_logical_names(stack_name=stack_name, logical_name=logical_name)
+        response = cls._CF_CLIENT.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_name)
         if not response or "StackResourceDetail" not in response:
             raise RuntimeError("Resource does not exist!")
         return response["StackResourceDetail"]
 
-    def _get_physical_resource_id(self, stack_name=None, logical_name=None):
-        return self._describe_stack_resource(stack_name=stack_name, logical_name=logical_name)["PhysicalResourceId"]
+    @classmethod
+    def _get_physical_resource_id(cls, stack_name=None, logical_name=None):
+        return cls._describe_stack_resource(stack_name=stack_name, logical_name=logical_name)["PhysicalResourceId"]
 
-    def _get_template(self, stack_name=None):
-        stack_name = self._get_stack_name(stack_name=stack_name)
+    @classmethod
+    def _get_template(cls, stack_name=None):
+        stack_name = cls._get_stack_name(stack_name=stack_name)
         try:
-            template = self._cf_client.get_template(StackName=stack_name)["TemplateBody"]
+            template = cls._CF_CLIENT.get_template(StackName=stack_name)["TemplateBody"]
         except ValidationError:
             raise RuntimeError("Unable to retrieve template for stack {}, likely due to it not existing.".format(stack_name))
         return template
 
-    def SCHEMA(self):
-        stack_name, logical_name = self._get_stack_and_logical_names()
-        template = self._get_template(stack_name=stack_name)
+    @classmethod
+    def _SCHEMA(cls):
+        stack_name, logical_name = cls._get_stack_and_logical_names()
+        template = cls._get_template(stack_name=stack_name)
         resources = template["Resources"]
         if logical_name not in resources:
             raise RuntimeError("Stack doesn't contain a table with the given logical name!")
@@ -455,24 +452,18 @@ class CFObject(Object):
         table_type = "AWS::DynamoDB::Table"
         if not table_type == resource["Type"]:
             raise RuntimeError("Logical resource {} in stack {} is of type '{}', not type '{}'".format(logical_name, stack_name, resource["Type"], table_type))
-        properties = resource["Properties"]
+        properties = dict(resource["Properties"])
+        properties["TableName"] = cls._get_physical_resource_id()
         return properties
-
-    def TABLE_NAME(self):
-        return self._get_physical_resource_id()
-
-    def _get_or_create_table_inner(self):
-        table_name = self.TABLE_NAME()
-        try:
-            description = self._client.describe_table(TableName=table_name)
-        except ClientError as e:
-            raise RuntimeError("Table {} does not exist!".format(table_name))
-        return boto3.resource('dynamodb').Table(table_name)
 
     @classmethod
     def _get_relation_map(cls, obj):
         stack_name, logical_name = obj._get_stack_and_logical_names()
         return {'class':cls.get_classname(), '_cf_stack_name':stack_name, '_cf_logical_name':logical_name}
+
+    @classmethod
+    def _from_fkey(cls, _cf_stack_name, _cf_logical_name, **kwargs):
+        return cls.lazysubclass(stack_name=_cf_stack_name, logical_name=_cf_logical_name)(**kwargs)
 
     @classmethod
     def lazysubclass(cls, stack_name=None, logical_name=None):
@@ -485,5 +476,5 @@ class CFObject(Object):
         class LazyObject(cls):
             _CF_STACK_NAME = stack_name if stack_name else cls._CF_STACK_NAME
             _CF_LOGICAL_NAME = logical_name if logical_name else cls._CF_LOGICAL_NAME
-            _CLASSNAME = cls.get_classname()
+            _CLASSNAME = cls.CLASS_NAME()
         return LazyObject
