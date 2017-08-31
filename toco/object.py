@@ -336,7 +336,6 @@ class TocoObject(BaseTocoObject):
         return hash_key, range_key
 
     def _get_key_dict(self, dictionary=None):
-        # TODO: THIS IS BROKEN.  FIX IT.
         hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
         print(hash_keyname)
         print(range_keyname)
