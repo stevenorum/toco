@@ -55,7 +55,7 @@ def is_foreign_key(fkey):
         # but I'll add that later if it looks useful.
         return False
 
-def load_from_fkey(fkey):
+def load_from_fkey(fkey, **kwargs):
     '''
     If fkey is a toco foreign key, load it from DynamoDB.
 
@@ -70,6 +70,7 @@ def load_from_fkey(fkey):
     del obj['key']
     del obj['class']
     obj.update(key)
+    obj.update(**kwargs)
     return get_class(clazzname)._from_fkey(**obj)
 
 class BaseTocoObject(object):
@@ -80,6 +81,7 @@ class BaseTocoObject(object):
     _TABLE_CACHE = None
     _CLASSNAME = None
     _REQUIRED_ATTRS = []
+    _COMPOUND_ATTRS = {}
 
     @classmethod
     def _encode_nexttoken(cls, key):
@@ -123,6 +125,11 @@ class BaseTocoObject(object):
             params["ExclusiveStartKey"] = cls._decode_nexttoken(params["NextToken"])
         if "NextToken" in params:
             del params["NextToken"]
+        if params.get("HashKey", None) and not params.get("KeyConditionExpression", None):
+            hashname, rangename = cls._HASH_AND_RANGE_KEYS(index_name = params.get("IndexName", None))
+            params["KeyConditionExpression"] = Key(hashname).eq(params["HashKey"])
+        if "HashKey" in params:
+            del params["HashKey"]
         return params
 
     @classmethod
@@ -135,6 +142,18 @@ class BaseTocoObject(object):
         if results.get("LastEvaluatedKey", None):
             response["NextToken"] = cls._encode_nexttoken(results["LastEvaluatedKey"])
         return response
+
+    @classmethod
+    def scan(cls, **kwargs):
+        params = cls._preprocess_search_params(**kwargs)
+        results = cls.TABLE().scan(**params)
+        return cls._postprocess_search_results(results)
+
+    @classmethod
+    def query(cls, **kwargs):
+        params = cls._preprocess_search_params(**kwargs)
+        results = cls.TABLE().query(**params)
+        return cls._postprocess_search_results(results)
 
     @classmethod
     def SCHEMA(cls, use_cache=True):
@@ -168,18 +187,6 @@ class BaseTocoObject(object):
         boto3.client("dynamodb").create_table(**cls._SCHEMA())
 
     @classmethod
-    def scan(cls, **kwargs):
-        params = cls._preprocess_search_params(**kwargs)
-        results = cls.TABLE().scan(**params)
-        return cls._postprocess_search_results(results)
-
-    @classmethod
-    def query(cls, **kwargs):
-        params = cls._preprocess_search_params(**kwargs)
-        results = cls().TABLE().query(**params)
-        return cls._postprocess_search_results(results)
-
-    @classmethod
     def _get_required_attributes(cls):
         attrs = []
         hashkn, rangekn = cls._HASH_AND_RANGE_KEYS()
@@ -191,9 +198,17 @@ class BaseTocoObject(object):
         return attrs
 
     @classmethod
-    def _HASH_AND_RANGE_KEYS(cls):
-        hash = [h['AttributeName'] for h in cls._SCHEMA()['KeySchema'] if h['KeyType']=='HASH'][0]
-        ranges = [r['AttributeName'] for r in cls._SCHEMA()['KeySchema'] if r['KeyType']=='RANGE']
+    def _HASH_AND_RANGE_KEYS(cls, index_name=None):
+        schema = cls._SCHEMA()
+        key_schema = schema['KeySchema']
+        if index_name:
+            gsis = schema.get("GlobalSecondaryIndexes", [])
+            matches = [gsi for gsi in gsis if gsi["IndexName"] == index_name]
+            if len(matches) == 0:
+                raise RuntimeError("No index with the name '{index_name}' found!".format(index_name=index_name))
+            key_schema = matches[0]["KeySchema"]
+        hash = [h['AttributeName'] for h in key_schema if h['KeyType']=='HASH'][0]
+        ranges = [r['AttributeName'] for r in key_schema if r['KeyType']=='RANGE']
         range = ranges[0] if ranges else None
         return hash, range
 
@@ -203,7 +218,18 @@ class BaseTocoObject(object):
 
     @classmethod
     def _from_fkey(cls, **kwargs):
-        return cls(**kwargs)
+        obj = cls(**kwargs)
+        obj._needs_reloaded = True
+        return obj
+
+    @classmethod
+    def _add_compound_attr(cls, attrname, attrfunc, save=False):
+        cls._COMPOUND_ATTRS[attrname] = {"func":attrfunc,"save":save}
+
+    @classmethod
+    def _remove_compound_attr(cls, attrname):
+        if attrname in cls._COMPOUND_ATTRS:
+            del cls._COMPOUND_ATTRS[attrname]
 
 class TocoObject(BaseTocoObject):
     '''
@@ -218,6 +244,7 @@ class TocoObject(BaseTocoObject):
     :rtype: toco object
     '''
     def __init__(self, _in_db=False, _attempt_load=True, **kwargs):
+        self._needs_reloaded = not _attempt_load
         self._obj_dict = {}
         self._fkey_cache = {}
         self._obj_loaded = {}
@@ -251,18 +278,29 @@ class TocoObject(BaseTocoObject):
             self._obj_updates[name] = value
 
     def __getattribute__(self, name):
-        if name.startswith("_") or name not in self._obj_dict:
+        if name.startswith("_"):
+            # or name in self.__dict__(name not in self._obj_dict and name not in self.__class__._COMPOUND_ATTRS):
             if name in object.__getattribute__(self, "__dict__"):
                 return object.__getattribute__(self, "__dict__").get(name)
             return object.__getattribute__(self, name)
         else:
-            value = self._obj_dict[name]
-            if is_foreign_key(value):
-                obj = load_from_fkey(value)
-                self._fkey_cache[name] = obj
-                return obj
+            if self._needs_reloaded:
+                self._reload()
+                self._needs_reloaded = False
+            if name in self._obj_dict:
+                value = self._obj_dict[name]
+                if is_foreign_key(value):
+                    obj = load_from_fkey(value)
+                    self._fkey_cache[name] = obj
+                    return obj
+                else:
+                    return self._obj_dict[name]
+            elif name in self.__class__._COMPOUND_ATTRS:
+                return self.__class__._COMPOUND_ATTRS[name]["func"](self)
             else:
-                return self._obj_dict[name]
+                if name in object.__getattribute__(self, "__dict__"):
+                    return object.__getattribute__(self, "__dict__").get(name)
+                return object.__getattribute__(self, name)
 
     def __delattr__(self, name):
         if name in self._obj_dict:
@@ -281,6 +319,16 @@ class TocoObject(BaseTocoObject):
         self._obj_loaded = self._obj_dict
         self._obj_updates = {}
 
+    def _get_dict_to_save(self):
+        dict_to_save = copy.copy(self._obj_dict)
+        compattrs = self.__class__._COMPOUND_ATTRS
+        for attrname in compattrs:
+            if attrname in dict_to_save:
+                continue
+            elif compattrs[attrname].get("save", False):
+                dict_to_save[attrname] = compattrs[attrname]["func"](self)
+        return dict_to_save
+
     def _my_hash_and_range(self):
         hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
         hash_key = getattr(self, hash_keyname)
@@ -288,13 +336,18 @@ class TocoObject(BaseTocoObject):
         return hash_key, range_key
 
     def _get_key_dict(self, dictionary=None):
+        # TODO: THIS IS BROKEN.  FIX IT.
         hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
+        print(hash_keyname)
+        print(range_keyname)
         keys = {}
         dictionary = dictionary if dictionary else self._obj_dict
+        print(dictionary)
         for k in (hash_keyname, range_keyname):
             if k and k in dictionary.keys():
                 # I'm explicitly bypassing the getter here in the off chance either hash or range is a foreign key
                 keys[k] = dictionary[k]
+        print(keys)
         return keys
 
     def _get_relation_map(self):
@@ -319,6 +372,13 @@ class TocoObject(BaseTocoObject):
         '''
         return FKEY_PREFIX+json.dumps(self._get_relation_map(), sort_keys=True, separators=(',', ':'))
 
+    @classmethod
+    def _json_deserialize(cls, fkey):
+        return load_from_fkey(fkey, _attempt_load=False)
+
+    def _json_serialize(self):
+        return self._foreign_key(), self.__class__.CLASS_NAME()
+    
     def _save(self, force=False, save_if_missing=True, save_if_existing=True):
         if not save_if_missing and not save_if_existing:
             raise RuntimeError("At least one of save_if_missing and save_if_existing must be true.")
@@ -359,11 +419,7 @@ class TocoObject(BaseTocoObject):
         return self._save(force=force, save_if_existing=False, save_if_missing=True)
 
     def _store(self, CE=None):
-        # Broken out separately so that we can easily manipulate the blob being saved.
-        dict_to_save = copy.copy(self._obj_dict)
-        # for key in [k for k in self.obj_dict.keys() if isinstance(self.obj_dict[k], TocoObject)]:
-        #     fkey = self._obj_dict[key]._foreign_key
-        #     dict_to_save[key] = fkey
+        dict_to_save = self._get_dict_to_save()
         required = self._get_required_attributes()
         missing = [r for r in required if not r in dict_to_save or not dict_to_save[r]]
         if missing:
@@ -375,13 +431,14 @@ class TocoObject(BaseTocoObject):
         return self
 
     def _load(self):
-        return self.__class__.TABLE().get_item(Key=self._extract_hash_and_range(self._obj_dict)).get("Item", {})
+        return self.__class__.TABLE().get_item(Key=self._get_key_dict()).get("Item", {})
 
     def _reload(self):
         '''
         Reloads the item's attributes from DynamoDB, replacing whatever's currently in the object.
         '''
         self._obj_dict = self._load()
+        self._in_db = True
         self._clear_update_record()
         return self
 
@@ -456,9 +513,9 @@ class CFObject(TocoObject):
         return properties
 
     @classmethod
-    def _get_relation_map(cls, obj):
+    def _get_class_relation_map(cls, obj):
         stack_name, logical_name = obj._get_stack_and_logical_names()
-        return {'class':cls.get_classname(), '_cf_stack_name':stack_name, '_cf_logical_name':logical_name}
+        return {'class':cls.CLASS_NAME(), '_cf_stack_name':stack_name, '_cf_logical_name':logical_name}
 
     @classmethod
     def _from_fkey(cls, _cf_stack_name, _cf_logical_name, **kwargs):
