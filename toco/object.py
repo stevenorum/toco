@@ -7,6 +7,7 @@ from boto3.dynamodb.types import TypeSerializer
 import boto3
 from calvin import caljson
 import copy
+import decimal
 import inspect
 import json
 import logging
@@ -14,6 +15,9 @@ import os
 import traceback
 
 VERSION_KEY = 'version_toco_'
+
+JSON_CLASS = '_class_toco'
+JSON_FKEY = '_fkey_toco'
 
 RELATION_SUFFIX = '_rel_toco_'
 FKEY_PREFIX = 'toco_fkey='
@@ -73,6 +77,17 @@ def load_from_fkey(fkey, **kwargs):
     obj.update(**kwargs)
     return get_class(clazzname)._from_fkey(**obj)
 
+def ensure_ddbsafe(d):
+    ts = TypeSerializer()
+    if isinstance(d, dict):
+        return {k:ensure_ddbsafe(d[k]) for k in d}
+    elif isinstance(d, list):
+        return [ensure_ddbsafe(e) for e in d]
+    elif isinstance(d, float):
+        return decimal.Decimal(d)
+    else:
+        return d
+
 class BaseTocoObject(object):
     """
     Holder class for a bunch of class methods and stuff like that.
@@ -82,6 +97,14 @@ class BaseTocoObject(object):
     _CLASSNAME = None
     _REQUIRED_ATTRS = []
     _COMPOUND_ATTRS = {}
+
+    @classmethod
+    def _from_dict(cls, d):
+        if d.get(JSON_FKEY, None):
+            return load_from_fkey(d[JSON_FKEY])
+        if d.get(JSON_CLASS, None):
+            return get_class(d[JSON_CLASS])(**d)
+        return cls(**d)
 
     @classmethod
     def _encode_nexttoken(cls, key):
@@ -245,6 +268,8 @@ class TocoObject(BaseTocoObject):
     '''
     def __init__(self, _in_db=False, _attempt_load=True, **kwargs):
         self._needs_reloaded = not _attempt_load
+        self._serialize_as_dict = True
+        self._raise_on_getattr_miss = False
         self._obj_dict = {}
         self._fkey_cache = {}
         self._obj_loaded = {}
@@ -262,7 +287,8 @@ class TocoObject(BaseTocoObject):
                 self._update_attrs(**description['Item'])
                 self._clear_update_record()
                 self._in_db = True
-        self._update_attrs(**kwargs)
+        # Don't treat init-time changes as real changes if they match the DB.
+        self._update_attrs_changed(**kwargs)
 
     def __setattr__(self, name, value):
         if name.startswith("_"):
@@ -275,7 +301,9 @@ class TocoObject(BaseTocoObject):
                 self._obj_dict[name] = value
                 if name in self._fkey_cache:
                     del self._fkey_cache[name]
-            self._obj_updates[name] = value
+            if name != VERSION_KEY:
+                # The version key is special and shouldn't be tracked
+                self._obj_updates[name] = value
 
     def __getattribute__(self, name):
         if name.startswith("_"):
@@ -298,9 +326,15 @@ class TocoObject(BaseTocoObject):
             elif name in self.__class__._COMPOUND_ATTRS:
                 return self.__class__._COMPOUND_ATTRS[name]["func"](self)
             else:
-                if name in object.__getattribute__(self, "__dict__"):
-                    return object.__getattribute__(self, "__dict__").get(name)
-                return object.__getattribute__(self, name)
+                try:
+                    if name in object.__getattribute__(self, "__dict__"):
+                        return object.__getattribute__(self, "__dict__").get(name)
+                    return object.__getattribute__(self, name)
+                except AttributeError as e:
+                    if self._raise_on_getattr_miss:
+                        raise e
+                    else:
+                        return None
 
     def __delattr__(self, name):
         if name in self._obj_dict:
@@ -314,6 +348,11 @@ class TocoObject(BaseTocoObject):
     def _update_attrs(self, **kwargs):
         for k in kwargs:
             setattr(self, k, kwargs[k])
+
+    def _update_attrs_changed(self, **kwargs):
+        for k in kwargs:
+            if getattr(self, k) != kwargs[k]:
+                setattr(self, k, kwargs[k])
 
     def _clear_update_record(self):
         self._obj_loaded = self._obj_dict
@@ -376,11 +415,20 @@ class TocoObject(BaseTocoObject):
         return load_from_fkey(fkey, _attempt_load=False)
 
     def _json_serialize(self):
-        return self._foreign_key(), self.__class__.CLASS_NAME()
-    
-    def _save(self, force=False, save_if_missing=True, save_if_existing=True):
+        if self._serialize_as_dict:
+            d = self._get_dict_to_save()
+            d[JSON_CLASS] = self.__class__.CLASS_NAME()
+            d[JSON_FKEY] = self._foreign_key()
+            return d, "dict"
+        else:
+            return self._foreign_key(), self.__class__.CLASS_NAME()
+
+    def _save(self, force=False, save_if_missing=True, save_if_existing=True, only_if_updated=True):
         if not save_if_missing and not save_if_existing:
             raise RuntimeError("At least one of save_if_missing and save_if_existing must be true.")
+
+        if only_if_updated and not self._obj_updates:
+            return self
 
         old_version = getattr(self, VERSION_KEY)
         create_condition = Attr(VERSION_KEY).not_exists()
@@ -423,6 +471,7 @@ class TocoObject(BaseTocoObject):
         missing = [r for r in required if not r in dict_to_save or not dict_to_save[r]]
         if missing:
             raise RuntimeError('The following attributes are missing and must be added before saving: '+', '.join(missing))
+        dict_to_save = ensure_ddbsafe(dict_to_save)
         if CE:
             self.__class__.TABLE().put_item(Item=dict_to_save, ConditionExpression=CE)
         else:
