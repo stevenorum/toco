@@ -1,4 +1,4 @@
-#!/usr/bin/env python3A
+#!/usr/bin/env python3
 
 import base64
 from botocore.exceptions import *
