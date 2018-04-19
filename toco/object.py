@@ -5,7 +5,6 @@ from botocore.exceptions import *
 from boto3.dynamodb.conditions import Key, Attr, Or
 from boto3.dynamodb.types import TypeSerializer
 import boto3
-from calvin import caljson
 import copy
 import decimal
 import inspect
@@ -111,7 +110,7 @@ class BaseTocoObject(object):
         # TODO: replace the json step with something that'll work for any input
         # Convert to a string
         # This won't work for a lot of valid keys due to the json serialization step
-        key = caljson.dumps(key)
+        key = json.dumps(key)
         # base64 encode it to make it safer to handle
         key = base64.urlsafe_b64encode(key.encode("utf-8")).decode("utf-8")
         # strip the padding, as we can easily re-add it later
@@ -127,7 +126,7 @@ class BaseTocoObject(object):
         key = base64.urlsafe_b64decode(key.encode("utf-8")).decode("utf-8")
         # load the string back into a dict
         # This won't work for a lot of valid keys due to the json serialization step
-        key = caljson.loads(key)
+        key = json.loads(key)
         return key
 
     @classmethod

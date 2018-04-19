@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 
-from setuptools import setup
-import tenzing
+from distutils.core import setup
 
-setup(name='toco',
-      version='0.1.0',
-      description='DynamoDB data relationship management framework.',
-      author='Steve Norum',
-      author_email='stevenorum@gmail.com',
-      url='www.stevenorum.com',
-      packages=['toco'],
-      package_dir={'toco': 'toco'}, 
-      cmdclass = {'upload':tenzing.Upload}
+MAJOR_VERSION='0'
+MINOR_VERSION='0'
+PATCH_VERSION='1'
+
+VERSION = "{}.{}.{}".format(MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION)
+
+setup(
+    name = 'toco',
+    packages = ['toco'],
+    version = VERSION,
+    description = 'Basic tools for interacting with DynamoDB.',
+    author = 'Steve Norum',
+    author_email = 'sn@drunkenrobotlabs.org',
+    url = 'https://github.com/stevenorum/toco',
+    download_url = 'https://github.com/stevenorum/toco/archive/{}.tar.gz'.format(VERSION),
+    keywords = ['python','aws','dynamodb'],
+    classifiers = [],
 )
