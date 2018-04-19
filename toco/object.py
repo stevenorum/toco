@@ -136,7 +136,6 @@ class BaseTocoObject(object):
             params = dict(item)
             params["_in_db"] = True
             params["_attempt_load"] = False
-            params["_load_depth"] = 0
             items.append(cls(**params))
         return items
 
@@ -261,12 +260,11 @@ class TocoObject(BaseTocoObject):
 
     Constructor args:
 
-    :param _load_depth: How deeply to load objects.  0 just loads the given object.  If it has as attributes any toco Objects, they are not loaded.  Passing 1 (default) will load those objects from DynamoDB.  Passing 2 will load any toco Object attributes of those objects, and so on.
     :param kwargs: Keys for an object, and any attributes to attach to that object.
     :rtype: toco object
     '''
     def __init__(self, _in_db=False, _attempt_load=True, **kwargs):
-        self._needs_reloaded = not _attempt_load
+        self._needs_reloaded = False
         self._serialize_as_dict = True
         self._raise_on_getattr_miss = False
         self._obj_dict = {}
@@ -286,7 +284,7 @@ class TocoObject(BaseTocoObject):
                 self._update_attrs(**description['Item'])
                 self._clear_update_record()
                 self._in_db = True
-        # Don't treat init-time changes as real changes if they match the DB.
+                # Don't treat init-time changes as real changes if they match the DB.
         self._update_attrs_changed(**kwargs)
 
     def __setattr__(self, name, value):
@@ -375,16 +373,12 @@ class TocoObject(BaseTocoObject):
 
     def _get_key_dict(self, dictionary=None):
         hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
-        print(hash_keyname)
-        print(range_keyname)
         keys = {}
         dictionary = dictionary if dictionary else self._obj_dict
-        print(dictionary)
         for k in (hash_keyname, range_keyname):
             if k and k in dictionary.keys():
                 # I'm explicitly bypassing the getter here in the off chance either hash or range is a foreign key
                 keys[k] = dictionary[k]
-        print(keys)
         return keys
 
     def _get_relation_map(self):
