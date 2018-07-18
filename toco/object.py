@@ -6,6 +6,7 @@ from boto3.dynamodb.conditions import Key, Attr, Or
 from boto3.dynamodb.types import TypeSerializer
 import boto3
 import copy
+from datetime import datetime
 import decimal
 import inspect
 import json
@@ -21,7 +22,17 @@ JSON_FKEY = '_fkey_toco'
 RELATION_SUFFIX = '_rel_toco_'
 FKEY_PREFIX = 'toco_fkey='
 
+DATETIME_FORMAT = "datetime:%Y-%m-%dT%H:%M:%S.%fZ"
+
 logger = logging.getLogger(__name__)
+
+def load_python_class_if_applicable(value):
+    if value and isinstance(value, str) and value.startswith("datetime:"):
+        try:
+            return datetime.strptime(value, DATETIME_FORMAT)
+        except:
+            pass
+    return value
 
 def get_class(clazzname):
     '''
@@ -84,6 +95,8 @@ def ensure_ddbsafe(d):
         return [ensure_ddbsafe(e) for e in d]
     elif isinstance(d, float):
         return decimal.Decimal(d)
+    elif isinstance(d, datetime):
+        return d.strftime(DATETIME_FORMAT)
     else:
         return d
 
@@ -148,9 +161,21 @@ class BaseTocoObject(object):
             del params["NextToken"]
         if params.get("HashKey", None) and not params.get("KeyConditionExpression", None):
             hashname, rangename = cls._HASH_AND_RANGE_KEYS(index_name = params.get("IndexName", None))
-            params["KeyConditionExpression"] = Key(hashname).eq(params["HashKey"])
+            hkc = Key(hashname).eq(params["HashKey"])
+            if params.get("RangeKey", None):
+                rk = params["RangeKey"]
+                if isinstance(rk,(list, tuple)):
+                    rkc = getattr(Key(rangename),rk[0])(*rk[1:])
+                else:
+                    rkc = Key(rangename).eq(rk_arg)
+                kce = hkc & rkc
+            else:
+                kce = hkc
+            params["KeyConditionExpression"] = kce
         if "HashKey" in params:
             del params["HashKey"]
+        if "RangeKey" in params:
+            del params["RangeKey"]
         return params
 
     @classmethod
@@ -175,6 +200,13 @@ class BaseTocoObject(object):
         params = cls._preprocess_search_params(**kwargs)
         results = cls.TABLE().query(**params)
         return cls._postprocess_search_results(results)
+
+    @classmethod
+    def load(cls, **kwargs):
+        obj = cls(_attempt_load=True, **kwargs)
+        if obj._in_db:
+            return obj
+        return None
 
     @classmethod
     def SCHEMA(cls, use_cache=True):
@@ -319,7 +351,7 @@ class TocoObject(BaseTocoObject):
                     self._fkey_cache[name] = obj
                     return obj
                 else:
-                    return self._obj_dict[name]
+                    return load_python_class_if_applicable(self._obj_dict[name])
             elif name in self.__class__._COMPOUND_ATTRS:
                 return self.__class__._COMPOUND_ATTRS[name]["func"](self)
             else:
@@ -364,6 +396,14 @@ class TocoObject(BaseTocoObject):
             elif compattrs[attrname].get("save", False):
                 dict_to_save[attrname] = compattrs[attrname]["func"](self)
         return dict_to_save
+
+    def _get_data_dict(self):
+        d = self._get_dict_to_save()
+        keys = list(d.keys())
+        for k in keys:
+            if k.startswith("toco_") or k.endswith("_toco") or "_toco_" in k or k.startswith("_"):
+                del d[k]
+        return d
 
     def _my_hash_and_range(self):
         hash_keyname, range_keyname = self.__class__._HASH_AND_RANGE_KEYS()
@@ -430,7 +470,7 @@ class TocoObject(BaseTocoObject):
         else:
             update_condition = Attr(VERSION_KEY).eq(old_version)
         CE = None
-        if force and save_if_missing and save_if_exsting:
+        if force and save_if_missing and save_if_existing:
             pass
         elif save_if_missing and save_if_existing:
             CE = Or(create_condition, update_condition)
@@ -471,6 +511,12 @@ class TocoObject(BaseTocoObject):
             self.__class__.TABLE().put_item(Item=dict_to_save)
         return self
 
+    def _delete(self, CE=None):
+        if CE:
+            return self.__class__.TABLE().delete_item(Key=self._get_key_dict(), ConditionExpression=CE)
+        else:
+            return self.__class__.TABLE().delete_item(Key=self._get_key_dict())
+
     def _load(self):
         return self.__class__.TABLE().get_item(Key=self._get_key_dict()).get("Item", {})
 
@@ -491,6 +537,8 @@ class CFObject(TocoObject):
     _CF_STACK_NAME = None
     _CF_LOGICAL_NAME = None
     _CF_CLIENT = boto3.client('cloudformation')
+    _CF_TEMPLATE = None
+    _CF_RESOURCES = {}
 
     @classmethod
     def _set_cf_info(cls, cf_stack_name=None, cf_logical_name=None):
@@ -520,10 +568,15 @@ class CFObject(TocoObject):
     @classmethod
     def _describe_stack_resource(cls, stack_name=None, logical_name=None):
         stack_name, logical_name = cls._get_stack_and_logical_names(stack_name=stack_name, logical_name=logical_name)
-        response = cls._CF_CLIENT.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_name)
-        if not response or "StackResourceDetail" not in response:
-            raise RuntimeError("Resource does not exist!")
-        return response["StackResourceDetail"]
+        if logical_name not in cls._CF_RESOURCES:
+            logging.warn("Cache miss loading _CF_RESOURCE for class {}".format(cls))
+            response = cls._CF_CLIENT.describe_stack_resource(StackName=stack_name, LogicalResourceId=logical_name)
+            if not response or "StackResourceDetail" not in response:
+                raise RuntimeError("Resource does not exist!")
+            cls._CF_RESOURCES[logical_name] = response["StackResourceDetail"]
+        else:
+            logging.info("Cache hit loading _CF_RESOURCE for class {}".format(cls))
+        return cls._CF_RESOURCES[logical_name]
 
     @classmethod
     def _get_physical_resource_id(cls, stack_name=None, logical_name=None):
@@ -532,11 +585,21 @@ class CFObject(TocoObject):
     @classmethod
     def _get_template(cls, stack_name=None):
         stack_name = cls._get_stack_name(stack_name=stack_name)
-        try:
-            template = cls._CF_CLIENT.get_template(StackName=stack_name)["TemplateBody"]
-        except ValidationError:
-            raise RuntimeError("Unable to retrieve template for stack {}, likely due to it not existing.".format(stack_name))
-        return template
+        if not getattr(cls, "_CF_TEMPLATE"):
+            logging.warn("Cache miss loading _CF_TEMPLATE for class {}".format(cls))
+            try:
+                template = cls._CF_CLIENT.get_template(StackName=stack_name)["TemplateBody"]
+                setattr(cls, "_CF_TEMPLATE", template)
+            except ValidationError:
+                raise RuntimeError("Unable to retrieve template for stack {}, likely due to it not existing.".format(stack_name))
+        else:
+            logging.info("Cache hit loading _CF_TEMPLATE for class {}".format(cls))
+        return cls._CF_TEMPLATE
+
+    @classmethod
+    def _clear_cf_cache(cls):
+        setattr(cls, "_CF_TEMPLATE", None)
+        setattr(cls, "_CF_RESOURCES", {})
 
     @classmethod
     def _SCHEMA(cls):
