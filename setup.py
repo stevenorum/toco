@@ -16,7 +16,6 @@ def main():
         name = 'toco',
         packages = packages,
         package_dir = package_dir,
-        packages = ['toco'],
         version = VERSION,
         description = 'Basic tools for interacting with DynamoDB.',
         author = 'Steve Norum',
