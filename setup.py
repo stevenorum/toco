@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from distutils.core import setup
+from setuptools import setup
 
 MAJOR_VERSION='0'
 MINOR_VERSION='0'
@@ -24,6 +24,7 @@ def main():
         download_url = 'https://github.com/stevenorum/toco/archive/{}.tar.gz'.format(VERSION),
         keywords = ['python','aws','dynamodb'],
         classifiers = [],
+        test_suite='tests',
     )
 
 if __name__ == "__main__":
