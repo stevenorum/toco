@@ -4,7 +4,7 @@ from setuptools import setup
 
 MAJOR_VERSION='0'
 MINOR_VERSION='0'
-PATCH_VERSION='6'
+PATCH_VERSION='7'
 
 VERSION = "{}.{}.{}".format(MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION)
 
@@ -24,6 +24,9 @@ def main():
         download_url = 'https://github.com/stevenorum/toco/archive/{}.tar.gz'.format(VERSION),
         keywords = ['python','aws','dynamodb'],
         classifiers = [],
+        install_requires=[
+            'boto3'
+        ],
         test_suite='tests',
     )
 
