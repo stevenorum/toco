@@ -22,6 +22,9 @@ JSON_FKEY = '_fkey_toco'
 RELATION_SUFFIX = '_rel_toco_'
 FKEY_PREFIX = 'toco_fkey='
 
+FKEY_EMPTY_STRING = FKEY_PREFIX + "EMPTY-STRING"
+CONSTANT_FKEYS = {FKEY_EMPTY_STRING: ""}
+
 DATETIME_FORMAT = "datetime:%Y-%m-%dT%H:%M:%S.%fZ"
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,8 @@ def is_foreign_key(fkey):
     '''
     if not isinstance(fkey, str) or not fkey.startswith(FKEY_PREFIX):
         return False
+    if fkey in CONSTANT_FKEYS:
+        return True
     try:
         obj = json.loads(fkey[len(FKEY_PREFIX):])
         obj['class']
@@ -78,6 +83,8 @@ def load_from_fkey(fkey, **kwargs):
     '''
     if not is_foreign_key(fkey):
         return None
+    if fkey in CONSTANT_FKEYS:
+        return CONSTANT_FKEYS[fkey]
     obj = json.loads(fkey[len(FKEY_PREFIX):])
     key = obj['key']
     clazzname = obj['class']
@@ -89,6 +96,11 @@ def load_from_fkey(fkey, **kwargs):
 
 def ensure_ddbsafe(d):
     ts = TypeSerializer()
+    if isinstance(d, str):
+        if len(d) == 0:
+            return FKEY_EMPTY_STRING
+        else:
+            return d
     if isinstance(d, dict):
         return {k:ensure_ddbsafe(d[k]) for k in d}
     elif isinstance(d, list):
@@ -97,6 +109,16 @@ def ensure_ddbsafe(d):
         return decimal.Decimal(d)
     elif isinstance(d, datetime):
         return d.strftime(DATETIME_FORMAT)
+    else:
+        return d
+
+def load_constant_fkeys(d):
+    if isinstance(d, str) and d in CONSTANT_FKEYS:
+        return CONSTANT_FKEYS[d]
+    elif isinstance(d, dict):
+        return {k:load_constant_fkeys(d[k]) for k in d}
+    elif isinstance(d, list):
+        return [load_constant_fkeys(e) for e in d]
     else:
         return d
 
@@ -375,6 +397,7 @@ class TocoObject(BaseTocoObject):
             object.__delattr__(self, name)
 
     def _update_attrs(self, **kwargs):
+        kwargs = load_constant_fkeys(kwargs)
         for k in kwargs:
             setattr(self, k, kwargs[k])
 
@@ -456,7 +479,7 @@ class TocoObject(BaseTocoObject):
         else:
             return self._foreign_key(), self.__class__.CLASS_NAME()
 
-    def _save(self, force=False, save_if_missing=True, save_if_existing=True, only_if_updated=True):
+    def _save(self, force=False, save_if_missing=True, save_if_existing=True, only_if_updated=False):
         if not save_if_missing and not save_if_existing:
             raise RuntimeError("At least one of save_if_missing and save_if_existing must be true.")
 
