@@ -122,6 +122,48 @@ def load_constant_fkeys(d):
     else:
         return d
 
+class blob(dict):
+    RESERVED_KEYS = ["__predefined_attributes__","__raise_on_miss","_blob__raise_on_miss"]
+    def __init__(self, *args, **kwargs):
+        __raise_on_miss = bool(kwargs.get("raise_on_miss"))
+        if "raise_on_miss" in kwargs:
+            del kwargs["raise_on_miss"]
+        super().__init__(*args, **kwargs)
+        self.__predefined_attributes__ = [a for a in dir(self)]
+        self.__predefined_attributes__.append("__predefined_attributes__")
+        self.__raise_on_miss = __raise_on_miss
+        self.__predefined_attributes__.append("__raise_on_miss")
+        for key in self.keys():
+            if not key in self.__predefined_attributes__:
+                setattr(self, key, self[key])
+                pass
+            pass
+        pass
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name not in blob.RESERVED_KEYS:
+            self.__setitem__(name, value)
+
+    def __getattribute__(self, name):
+        try:
+            return object.__getattribute__(self, name)
+        except:
+            if object.__getattribute__(self, "__raise_on_miss"):
+                return self.__getitem__(name)
+            else:
+                return self.get(name)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if not key in self.__predefined_attributes__:
+            object.__setattr__(self, key, self[key])
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        if not key in self.__predefined_attributes__:
+            delattr(self, key)
+
 class BaseTocoObject(object):
     """
     Holder class for a bunch of class methods and stuff like that.
@@ -181,19 +223,26 @@ class BaseTocoObject(object):
             params["ExclusiveStartKey"] = cls._decode_nexttoken(params["NextToken"])
         if "NextToken" in params:
             del params["NextToken"]
-        if params.get("HashKey", None) and not params.get("KeyConditionExpression", None):
+        if not params.get("KeyConditionExpression", None):
             hashname, rangename = cls._HASH_AND_RANGE_KEYS(index_name = params.get("IndexName", None))
-            hkc = Key(hashname).eq(params["HashKey"])
-            if params.get("RangeKey", None):
-                rk = params["RangeKey"]
-                if isinstance(rk,(list, tuple)):
-                    rkc = getattr(Key(rangename),rk[0])(*rk[1:])
+            if params.get(hashname) and not params.get("HashKey", None):
+                params["HashKey"] = params[hashname]
+                del params[hashname]
+            if params.get(rangename) and not params.get("RangeKey", None):
+                params["RangeKey"] = params[rangename]
+                del params[rangename]
+            if params.get("HashKey", None) and not params.get("KeyConditionExpression", None):
+                hkc = Key(hashname).eq(params["HashKey"])
+                if params.get("RangeKey", None):
+                    rk = params["RangeKey"]
+                    if isinstance(rk,(list, tuple)):
+                        rkc = getattr(Key(rangename),rk[0])(*rk[1:])
+                    else:
+                        rkc = Key(rangename).eq(rk_arg)
+                    kce = hkc & rkc
                 else:
-                    rkc = Key(rangename).eq(rk_arg)
-                kce = hkc & rkc
-            else:
-                kce = hkc
-            params["KeyConditionExpression"] = kce
+                    kce = hkc
+                params["KeyConditionExpression"] = kce
         if "HashKey" in params:
             del params["HashKey"]
         if "RangeKey" in params:
@@ -321,7 +370,7 @@ class TocoObject(BaseTocoObject):
         self._needs_reloaded = False
         self._serialize_as_dict = True
         self._raise_on_getattr_miss = False
-        self._obj_dict = {}
+        self._obj_dict = blob()
         self._fkey_cache = {}
         self._obj_loaded = {}
         self._obj_updates = {}
@@ -541,7 +590,10 @@ class TocoObject(BaseTocoObject):
             return self.__class__.TABLE().delete_item(Key=self._get_key_dict())
 
     def _load(self):
-        return self.__class__.TABLE().get_item(Key=self._get_key_dict()).get("Item", {})
+        b = blob()
+        b.update(self.__class__.TABLE().get_item(Key=self._get_key_dict()).get("Item", {}))
+        # return self.__class__.TABLE().get_item(Key=self._get_key_dict()).get("Item", {})
+        return b
 
     def _reload(self):
         '''
